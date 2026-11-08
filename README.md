@@ -13,8 +13,9 @@ principale, et publiée sans réinstaller Eraser.
   `eraser-extension.json` (identifiant, version, version d'API, empreinte SHA-256) et
   `eraser-extension.pack.gz` (les fichiers de l'extension). Ils sont fabriqués par
   `scripts/pack-extension.mjs`, recopié depuis Eraser.
-- Dans Eraser, **Administration › Extensions** choisit qui la reçoit : joueurs, MJ, admins. Leurs
-  installations la téléchargent, la vérifient et la mettent à jour toutes seules.
+- Toutes les installations d'Eraser la téléchargent, la vérifient et la mettent à jour toutes
+  seules (au lancement, toutes les six heures, et avec « Chercher les mises à jour ») ; qui peut
+  l'ouvrir est réglé dans Eraser (`openTo`).
 - Elle s'ouvre dans Eraser à l'adresse `/extension/doc`, avec la barre latérale d'Eraser.
 
 Le contrat complet (module `mount`, partie serveur, données partagées, version d'API) est décrit
