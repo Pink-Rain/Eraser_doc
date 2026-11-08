@@ -15,7 +15,8 @@
     "build": "node scripts/build.mjs",
     "check": "node scripts/check-types.mjs",
     "pack": "node scripts/pack-extension.mjs dist release",
-    "release": "npm run build && npm run check && npm run pack"
+    "release": "npm run build && npm run check && npm test && npm run pack",
+    "test": "node --test tests/*.test.mjs"
   },
   "devDependencies": {
     "@babel/core": "7.29.0",

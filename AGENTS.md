@@ -33,6 +33,8 @@ est décrit dans la section « Extensions » de l'`ARCHITECTURE.md` d'Eraser.
 - `npm run build` : esbuild (React Compiler compris), Tailwind avec le thème d'Eraser, et
   `assets/` copié dans `dist/`. Il échoue si `src/` importe un module qu'Eraser ne prête pas.
 - `npm run check` : types de `src/` avec ceux d'Eraser.
+- `npm test` : `tests/*.test.mjs` (fonds et polices : chaque clé d'Eraser a ses fichiers, un
+  document neuf passe le nettoyage d'Eraser), avec les modules d'Eraser comme à l'exécution.
 - `npm run pack` : `release/eraser-extension.json` et `release/eraser-extension.pack.gz`.
 
 ## Publier
