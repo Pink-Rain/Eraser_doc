@@ -1,0 +1,47 @@
+name: Publier Eraser Doc
+
+# Construit l'extension contre la version d'Eraser publiée (branche windows-app-migration : ses
+# types, son thème et la liste de ses classes Tailwind), puis publie une Release GitHub si la
+# version de package.json est nouvelle. Les installations d'Eraser la téléchargent ensuite seules.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copie d'Eraser
+        uses: actions/checkout@v4
+        with:
+          repository: Pink-Rain/Eraser
+          ref: windows-app-migration
+          path: eraser
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Dépendances d'Eraser (types)
+        working-directory: eraser
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: npm run check
+      - run: npm run pack
+      - name: Publier la version si elle est nouvelle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if gh release view "v$version" > /dev/null 2>&1; then
+            echo "v$version est déjà publiée : rien à faire (incrémenter version dans package.json)."
+            exit 0
+          fi
+          gh release create "v$version" release/eraser-extension.json release/eraser-extension.pack.gz --title "Eraser Doc $version" --notes-file RELEASE.md
