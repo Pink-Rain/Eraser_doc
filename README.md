@@ -1,6 +1,6 @@
 # Eraser Doc
 
-Extension d'[Eraser](https://github.com/Pink-Rain/Eraser), l'application de JDR : les documents de campagne (lettres, affiches, parchemins à donner aux joueurs).
+Extension d'[Eraser](https://github.com/Pink-Rain/Eraser), l'application de JDR : les documents de campagne (lettres, affiches, parchemins à donner aux joueurs), avec texte, lignes, formes, images, dessin à la plume calligraphique, calques et modes de fusion, rangés en dossiers et en modèles.
 
 L'éditeur des documents vit ici, à part de l'application principale, et se met à jour sans
 réinstaller Eraser. Instructions de travail : `AGENTS.md`.

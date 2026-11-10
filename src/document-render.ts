@@ -1,11 +1,13 @@
-import { DOCUMENT_WIDTH, type DocumentBackground, type DocumentContent, type DocumentFontKey, type DocumentRun, type DocumentZone } from "@/lib/document-model"
+import { DOCUMENT_WIDTH, type DocumentBackground, type DocumentContent, type DocumentFontKey, type DocumentLine, type DocumentPicture, type DocumentRun, type DocumentShape, type DocumentZone } from "@/lib/document-model"
 
 import { builtinBackgrounds, documentFonts } from "./document-assets"
+import { blendCanvas, lineCap, lineDash, orderedElements, shapeGradient, shapePath, withAlpha, zoneBlend } from "./document-elements"
 
 /**
- * Le rendu d'un document : son fond et ses zones de texte dessinés dans un canvas, à la
- * manière du navigateur dans l'éditeur (même police, même coupure des lignes, même
- * alignement). C'est cette image que lisent les joueurs, que reçoit Roll20 et dont est fait
+ * Le rendu d'un document : son fond, puis ses éléments dans l'ordre des calques (zones de texte,
+ * lignes, formes, images, calques de dessin), chacun avec son mode de fusion, dessinés dans un canvas à la
+ * manière du navigateur dans l'éditeur (même police, même coupure des lignes, même alignement,
+ * mêmes pointillés). C'est cette image que lisent les joueurs, que reçoit Roll20 et dont est fait
  * le PDF.
  */
 
@@ -125,7 +127,7 @@ export function drawZone(context: CanvasRenderingContext2D, zone: DocumentZone, 
   context.rotate((zone.rotation * Math.PI) / 180)
   context.translate(-width / 2, -height / 2)
   context.globalAlpha = zone.opacity
-  context.globalCompositeOperation = zone.ink ? "multiply" : "source-over"
+  context.globalCompositeOperation = blendCanvas(zoneBlend(zone))
   context.textBaseline = "alphabetic"
   const spacing = zone.letterSpacing * scale
   if ("letterSpacing" in context) (context as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = `${spacing}px`
@@ -159,11 +161,87 @@ export function drawZone(context: CanvasRenderingContext2D, zone: DocumentZone, 
   context.restore()
 }
 
+/** Dessine une ligne droite (mêmes tirets et mêmes bouts que dans l'éditeur). */
+export function drawLine(context: CanvasRenderingContext2D, line: DocumentLine, scale: number) {
+  context.save()
+  context.globalAlpha = line.opacity
+  context.globalCompositeOperation = blendCanvas(line.blend)
+  context.strokeStyle = line.color
+  context.lineWidth = line.width * scale
+  context.lineCap = lineCap(line.style)
+  context.setLineDash(lineDash(line.style, line.width * scale))
+  context.beginPath()
+  context.moveTo(line.x1 * scale, line.y1 * scale)
+  context.lineTo(line.x2 * scale, line.y2 * scale)
+  context.stroke()
+  context.restore()
+}
+
+let shapeLayer: HTMLCanvasElement | null = null
+
+/**
+ * Dessine une forme : remplissage puis contour, d'abord à part, puis posés d'un seul tenant avec
+ * l'opacité et le mode de fusion de la forme (comme le navigateur fond le SVG de l'éditeur).
+ */
+export function drawShape(context: CanvasRenderingContext2D, shape: DocumentShape, scale: number) {
+  shapeLayer ??= document.createElement("canvas")
+  const { width, height } = context.canvas
+  if (shapeLayer.width !== width || shapeLayer.height !== height) { shapeLayer.width = width; shapeLayer.height = height }
+  const layer = shapeLayer.getContext("2d")
+  if (!layer) return
+  layer.setTransform(1, 0, 0, 1, 0, 0)
+  layer.clearRect(0, 0, width, height)
+  layer.translate((shape.x + shape.width / 2) * scale, (shape.y + shape.height / 2) * scale)
+  layer.rotate((shape.rotation * Math.PI) / 180)
+  layer.scale(scale, scale)
+  layer.translate(-shape.width / 2, -shape.height / 2)
+  const path = new Path2D(shapePath(shape))
+  if (shape.fill === "solid") {
+    layer.fillStyle = shape.fillColor
+    layer.fill(path)
+  } else if (shape.fill !== "none") {
+    const geometry = shapeGradient(shape)
+    const gradient = geometry.kind === "radial"
+      ? layer.createRadialGradient(geometry.cx, geometry.cy, 0, geometry.cx, geometry.cy, geometry.r)
+      : layer.createLinearGradient(geometry.x1, geometry.y1, geometry.x2, geometry.y2)
+    gradient.addColorStop(0, shape.fillColor)
+    gradient.addColorStop(1, withAlpha(shape.fillColor2, shape.fillOpacity2))
+    layer.fillStyle = gradient
+    layer.fill(path)
+  }
+  if (shape.strokeWidth > 0) {
+    layer.strokeStyle = shape.strokeColor
+    layer.lineWidth = shape.strokeWidth
+    layer.lineJoin = "round"
+    layer.lineCap = lineCap(shape.strokeStyle)
+    layer.setLineDash(lineDash(shape.strokeStyle, shape.strokeWidth))
+    layer.stroke(path)
+  }
+  context.save()
+  context.globalAlpha = shape.opacity
+  context.globalCompositeOperation = blendCanvas(shape.blend)
+  context.drawImage(shapeLayer, 0, 0)
+  context.restore()
+}
+
+/** Dessine une image posée ou un calque de dessin, à sa place et à son inclinaison. */
+export function drawPicture(context: CanvasRenderingContext2D, picture: DocumentPicture, image: CanvasImageSource, scale: number) {
+  context.save()
+  context.translate((picture.x + picture.width / 2) * scale, (picture.y + picture.height / 2) * scale)
+  context.rotate((picture.rotation * Math.PI) / 180)
+  context.globalAlpha = picture.opacity
+  context.globalCompositeOperation = blendCanvas(picture.blend)
+  context.imageSmoothingQuality = "high"
+  context.drawImage(image, (-picture.width / 2) * scale, (-picture.height / 2) * scale, picture.width * scale, picture.height * scale)
+  context.restore()
+}
+
 /**
  * Le document entier dans un canvas de `width` pixels de large. `paper` : la couleur posée
- * sous le fond (blanc pour l'impression), transparent sinon.
+ * sous le fond (blanc pour l'impression), transparent sinon. `pictures` : les images des
+ * pièces (images posées, calques de dessin aplatis), par nom ; une pièce absente n'est pas dessinée.
  */
-export async function renderDocumentCanvas(content: DocumentContent, background: HTMLImageElement | null, width: number, paper = "") {
+export async function renderDocumentCanvas(content: DocumentContent, background: HTMLImageElement | null, width: number, paper = "", pictures: ReadonlyMap<string, CanvasImageSource> = new Map()) {
   await loadDocumentFonts()
   const scale = width / DOCUMENT_WIDTH
   const canvas = document.createElement("canvas")
@@ -175,7 +253,15 @@ export async function renderDocumentCanvas(content: DocumentContent, background:
   if (background) context.drawImage(background, 0, 0, canvas.width, canvas.height)
   // Les polices utilisées, chargées avant de dessiner (sinon le canvas prend la remplaçante).
   await Promise.all(content.zones.flatMap((zone) => [zoneFont(zone, {}, zone.size), zoneFont(zone, { bold: true }, zone.size), zoneFont(zone, { italic: true }, zone.size)].map((font) => document.fonts.load(font).catch(() => []))))
-  for (const zone of content.zones) drawZone(context, zone, scale)
+  for (const element of orderedElements(content)) {
+    if (element.kind === "zone") drawZone(context, element.zone, scale)
+    else if (element.kind === "line") drawLine(context, element.line, scale)
+    else if (element.kind === "shape") drawShape(context, element.shape, scale)
+    else {
+      const image = pictures.get(element.picture.asset)
+      if (image) drawPicture(context, element.picture, image, scale)
+    }
+  }
   return canvas
 }
 

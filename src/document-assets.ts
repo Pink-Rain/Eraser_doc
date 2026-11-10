@@ -79,9 +79,12 @@ export function newDocumentZone(partial: Partial<DocumentZone> = {}): DocumentZo
 export function documentFromBuiltin(key: BuiltinBackgroundKey): DocumentContent {
   const background = builtinBackgrounds[key]
   const height = DOCUMENT_WIDTH * background.height / background.width
-  return {
-    version: 1,
-    height,
-    zones: background.zones.map(({ text: content, ...zone }) => newDocumentZone({ ...zone, paragraphs: plainParagraphs(content) })),
-  }
+  const zones = background.zones.map(({ text: content, ...zone }) => newDocumentZone({ ...zone, paragraphs: plainParagraphs(content) }))
+  return { version: 1, height, zones, lines: [], shapes: [], pictures: [], order: zones.map((zone) => zone.id) }
+}
+
+/** Un nouveau document sur un fond venu d'ailleurs (ordinateur, adresse) : une zone prête à remplir. */
+export function documentOnOwnBackground(): DocumentContent {
+  const zone = newDocumentZone({ x: 120, y: 120, width: 760, height: 260, size: 34, paragraphs: [[{ text: "Écris ici le contenu du document…" }]] })
+  return { version: 1, height: DOCUMENT_WIDTH, zones: [zone], lines: [], shapes: [], pictures: [], order: [zone.id] }
 }

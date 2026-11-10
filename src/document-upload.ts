@@ -10,8 +10,8 @@ import { canvasBlob, loadImage } from "./document-render"
  *
  * Chaque image est donc préparée pour tenir sous cette limite (la qualité baisse d'abord, la
  * taille seulement si cela ne suffit pas), puis le document part en autant d'envois qu'il faut :
- * le fond importé d'abord (le serveur le veut avant ou avec le rendu), puis le rendu et
- * l'impression. Chaque envoi réécrit la même ligne du document ; le dernier fait foi.
+ * le fond importé d'abord (le serveur le veut avant ou avec le rendu), les images posées et les
+ * calques de dessin, puis le rendu et l'impression. Chaque envoi réécrit la même ligne du document ; le dernier fait foi.
  */
 
 /** La limite du serveur d'Eraser (1 Mo), moins une marge. */
@@ -19,7 +19,8 @@ const REQUEST_BUDGET = 1024 * 1024 - 16 * 1024
 /** En dessous, une image n'est plus réduite : elle part telle quelle. */
 const MIN_WIDTH = 480
 
-export type DocumentPart = { field: "background" | "render" | "print"; file: File }
+/** Une image d'un envoi : `background`, `render`, `print`, ou `piece-<nom>` (image posée, calque de dessin). */
+export type DocumentPart = { field: "background" | "render" | "print" | `piece-${string}`; file: File }
 
 /** Ce qui reste pour une image dans un envoi, une fois le document (JSON) compté. */
 export function partBudget(documentJson: string) {
@@ -54,11 +55,12 @@ export async function fittedBlob(canvas: HTMLCanvasElement, type: string, qualit
 }
 
 /**
- * Le fond importé, prêt à partir : tel quel s'il tient dans un envoi, sinon redessiné (au plus
- * la largeur du rendu, en WebP, qui garde la transparence) jusqu'à y tenir.
+ * Une image importée (fond, image posée), prête à partir : telle quelle si elle tient dans un envoi
+ * (et que son format est `accepted`), sinon redessinée (au plus la largeur du rendu, en WebP, qui
+ * garde la transparence) jusqu'à y tenir.
  */
-export async function fittedBackground(file: File, maxBytes: number) {
-  if (file.size <= maxBytes) return file
+export async function fittedBackground(file: File, maxBytes: number, accepted = /^image\//) {
+  if (file.size <= maxBytes && accepted.test(file.type)) return file
   const url = URL.createObjectURL(file)
   try {
     const image = await loadImage(url)

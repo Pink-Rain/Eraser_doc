@@ -8,12 +8,26 @@ est décrit dans la section « Extensions » de l'`ARCHITECTURE.md` d'Eraser.
 
 ## Ce qui vit où
 
-- Ici : l'éditeur (`src/document-studio.tsx`, `src/document-stage.tsx`), son rendu
-  (`src/document-render.ts` : l'image WebP que reçoivent les joueurs et Roll20, l'impression JPEG
-  du PDF), le texte riche (`src/document-text.ts`), les polices et les fonds (`assets/`, déclarés
-  dans `src/document-assets.ts`, servis à côté du module). `src/main.tsx` exporte `Page`.
-- **Le rendu doit couper les lignes comme l'éditeur** : toute mise en forme ajoutée à l'éditeur
-  l'est aussi au rendu, sinon l'image donnée aux joueurs ne ressemble plus à ce que le MJ a écrit.
+- Ici : l'éditeur (`src/document-studio.tsx` ; la scène `src/document-stage.tsx` ; les petits
+  panneaux `src/document-tools.tsx` ; la liste rangée en dossiers `src/document-library.tsx`), son
+  rendu (`src/document-render.ts` : l'image WebP que reçoivent les joueurs et Roll20, l'impression
+  JPEG du PDF), le texte riche (`src/document-text.ts`), les éléments communs à la scène et au rendu
+  (`src/document-elements.ts` : ordre des calques, modes de fusion, lignes, formes, plume
+  calligraphique), les polices et les fonds (`assets/`, déclarés dans `src/document-assets.ts`,
+  servis à côté du module). `src/main.tsx` exporte `Page`.
+- **Le rendu doit dessiner comme l'éditeur** : toute mise en forme ou tout élément ajouté à
+  l'éditeur l'est aussi au rendu (mêmes coupures de lignes, mêmes pointillés, mêmes chemins de
+  formes et dégradés, même mode de fusion CSS/canvas, `blendModes`), sinon l'image donnée aux
+  joueurs ne ressemble plus à ce que le MJ a fait. Une forme se dessine à part puis se fond d'un
+  seul tenant, comme le SVG de la scène.
+- Un document : zones de texte, lignes, formes, images posées et calques de dessin, dans l'ordre
+  de `content.order`. Un calque de dessin garde ses coups de plume en mémoire (annuler trait par
+  trait) et part dans Drive comme une image à l'enregistrement (`piece-<nom>`) ; une image posée
+  aussi. Dossier et modèle s'enregistrent tout seuls (`PATCH`), sans redessiner.
+- **Seuls les types viennent du modèle d'Eraser pour les nouveautés** : une valeur nouvelle du
+  modèle (liste, fonction) n'existe pas dans un Eraser plus ancien, qui prête quand même l'ancien
+  module. L'éditeur lit `features` (`?atelier=1`) et ne propose un outil que si Eraser sait le
+  garder (`calques`, `formes`, `dossiers`, `modeles`).
 - **Un envoi à Eraser ne dépasse jamais 1 Mo** : son serveur (vinext) refuse au-delà (413) tout POST
   `multipart/form-data`, même vers `/api/…`. Les images d'un document sont ajustées et réparties en
   plusieurs envois par `src/document-upload.ts` ; tout nouvel envoi de fichiers passe par là.
@@ -21,6 +35,8 @@ est décrit dans la section « Extensions » de l'`ARCHITECTURE.md` d'Eraser.
   nettoyage, marque d'inventaire, adresses ; emprunté), la feuille « Documents de campagne », les
   API (`/api/campaigns/<id>/documents…`, `?atelier=1` pour les données de l'éditeur), la lecture
   (`components/eraser/document-viewer.tsx`, empruntée), l'inventaire, le Créateur de session et Roll20.
+- Un élément ou un champ nouveau : d'abord dans le nettoyage de `lib/document-model.ts` d'Eraser
+  (qui efface ce qu'il ne connaît pas) et dans ses `features`, publié ; puis ici.
 - Une police ou un fond nouveau : sa clé d'abord dans `documentFontKeys` / `builtinBackgroundKeys`
   d'Eraser (qui refuse une clé inconnue à l'enregistrement), publiée ; puis ses fichiers dans
   `assets/` et sa déclaration dans `src/document-assets.ts`. Ne jamais renommer une clé.
@@ -36,8 +52,9 @@ est décrit dans la section « Extensions » de l'`ARCHITECTURE.md` d'Eraser.
 - `npm run build` : esbuild (React Compiler compris), Tailwind avec le thème d'Eraser, et
   `assets/` copié dans `dist/`. Il échoue si `src/` importe un module qu'Eraser ne prête pas.
 - `npm run check` : types de `src/` avec ceux d'Eraser.
-- `npm test` : `tests/*.test.mjs` (fonds et polices : chaque clé d'Eraser a ses fichiers, un
-  document neuf passe le nettoyage d'Eraser), avec les modules d'Eraser comme à l'exécution.
+- `npm test` : `tests/*.test.mjs` (fonds et polices : chaque clé d'Eraser a ses fichiers ; un
+  document neuf et chaque nouvel élément passent le nettoyage d'Eraser sans rien perdre ; ordre des
+  calques, formes, dégradés ; envois sous 1 Mo), avec les modules d'Eraser comme à l'exécution.
 - `npm run pack` : `release/eraser-extension.json` et `release/eraser-extension.pack.gz`.
 
 ## Publier

@@ -34,6 +34,10 @@ type StudioData = {
   documents: CampaignDocumentRecord[]
   sessions: Array<{ id: string; name: string }>
   players: Array<{ id: string; name: string }>
+  /** Les modèles du compte, dans toutes ses campagnes (Eraser alpha 285 et plus). */
+  templates?: CampaignDocumentRecord[]
+  /** Ce que le serveur sait garder : `dossiers`, `modeles`, `calques` (absent avant l'alpha 285). */
+  features?: string[]
 }
 
 export function Page({ eraser }: { eraser: EraserContext }) {
@@ -57,6 +61,8 @@ function CampaignDocuments({ eraser, campaignId }: { eraser: EraserContext; camp
         <DocumentStudio
           campaignId={data.campaign.id}
           initialDocuments={data.documents}
+          initialTemplates={data.templates ?? []}
+          features={data.features ?? []}
           sessions={data.sessions}
           players={data.players}
           initialDocumentId={initial.documentId}
