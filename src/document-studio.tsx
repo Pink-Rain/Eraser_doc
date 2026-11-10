@@ -23,7 +23,8 @@ import {
 import { cn } from "@/lib/utils"
 
 import { builtinBackgrounds, documentFonts, documentFromBuiltin, newDocumentZone } from "./document-assets"
-import { backgroundSource, canvasBlob, loadDocumentFonts, loadImage, renderDocumentCanvas } from "./document-render"
+import { backgroundSource, loadDocumentFonts, loadImage, renderDocumentCanvas } from "./document-render"
+import { documentForms, fittedBackground, fittedBlob, partBudget, type DocumentPart } from "./document-upload"
 import { DocumentStage, focusAt, zoneEditable } from "./document-stage"
 import { paragraphsFromElement } from "./document-text"
 
@@ -468,21 +469,38 @@ export function DocumentStudio({ campaignId, initialDocuments, sessions, players
     setSaving("render"); setMessage(null)
     try {
       const image = backgroundSrc ? await loadImage(backgroundSrc) : null
-      const render = await canvasBlob(await renderDocumentCanvas(snapshot.content, image, DOCUMENT_RENDER_WIDTH), "image/webp", 0.9)
-      const print = await canvasBlob(await renderDocumentCanvas(snapshot.content, image, DOCUMENT_RENDER_WIDTH, "#ffffff"), "image/jpeg", 0.9)
+      const documentJson = JSON.stringify({ id: snapshot.id, title: snapshot.title, sessionId: snapshot.sessionId, background: snapshot.background, content: snapshot.content })
+      // Chaque image tient dans un envoi (Eraser refuse plus de 1 Mo par envoi : document-upload.ts).
+      const budget = partBudget(documentJson)
+      const render = await fittedBlob(await renderDocumentCanvas(snapshot.content, image, DOCUMENT_RENDER_WIDTH), "image/webp", [0.9, 0.8, 0.7], budget)
+      const print = await fittedBlob(await renderDocumentCanvas(snapshot.content, image, DOCUMENT_RENDER_WIDTH, "#ffffff"), "image/jpeg", [0.9, 0.8, 0.7], budget)
+      const background = snapshot.uploadFile ? await fittedBackground(snapshot.uploadFile, budget) : null
       setSaving("upload")
-      const form = new FormData()
-      form.append("document", JSON.stringify({ id: snapshot.id, title: snapshot.title, sessionId: snapshot.sessionId, background: snapshot.background, content: snapshot.content }))
-      form.append("render", new File([render], render.type === "image/webp" ? "rendu.webp" : "rendu.png", { type: render.type }))
-      form.append("print", new File([print], "impression.jpg", { type: "image/jpeg" }))
-      if (snapshot.uploadFile) form.append("background", snapshot.uploadFile)
-      const response = await fetch(`/api/campaigns/${encodeURIComponent(campaignId)}/documents`, { method: "POST", body: form })
-      const payload = (await response.json().catch(() => ({}))) as { document?: CampaignDocumentRecord; error?: string }
-      if (!response.ok || !payload.document) throw new Error(payload.error || "Le document n’a pas pu être enregistré.")
-      const stored = payload.document
-      setDocuments((current) => current.some((document) => document.id === stored.id) ? current.map((document) => document.id === stored.id ? stored : document) : [...current, stored])
+      const parts: DocumentPart[] = [
+        ...(background ? [{ field: "background" as const, file: background }] : []),
+        { field: "render", file: new File([render], render.type === "image/webp" ? "rendu.webp" : "rendu.png", { type: render.type }) },
+        { field: "print", file: new File([print], "impression.jpg", { type: "image/jpeg" }) },
+      ]
+      let stored: CampaignDocumentRecord | null = null
+      let backgroundSent = false
+      for (const form of await documentForms(documentJson, parts)) {
+        const response = await fetch(`/api/campaigns/${encodeURIComponent(campaignId)}/documents`, { method: "POST", body: form })
+        const payload = (await response.json().catch(() => ({}))) as { document?: CampaignDocumentRecord; error?: string }
+        if (!response.ok || !payload.document) {
+          throw new Error(payload.error || (response.status === 413
+            ? "Le document est trop lourd pour être envoyé à Eraser : allège l’image de fond, puis réessaie."
+            : `Le document n’a pas pu être enregistré (réponse ${response.status} d’Eraser). Réessaie dans un instant.`))
+        }
+        const saved = payload.document
+        stored = saved
+        backgroundSent ||= form.has("background")
+        const clearUpload = backgroundSent
+        // Chaque envoi réussi est gardé : si le suivant échoue, le document existe déjà (et son fond aussi).
+        setDocuments((current) => current.some((document) => document.id === saved.id) ? current.map((document) => document.id === saved.id ? saved : document) : [...current, saved])
+        setDraft((current) => current && current.id === saved.id ? { ...current, isNew: false, uploadFile: clearUpload && current.uploadFile === snapshot.uploadFile ? null : current.uploadFile, renderVersion: saved.renderVersion, updatedAt: saved.updatedAt } : current)
+      }
+      if (!stored) throw new Error("Le document n’a pas pu être enregistré.")
       const kept: Draft = { ...snapshot, isNew: false, uploadFile: null, renderVersion: stored.renderVersion, updatedAt: stored.updatedAt }
-      setDraft((current) => current && current.id === stored.id ? { ...current, isNew: false, uploadFile: current.uploadFile === snapshot.uploadFile ? null : current.uploadFile, renderVersion: stored.renderVersion, updatedAt: stored.updatedAt } : current)
       setSavedSignature(signature(kept))
       try { window.localStorage.removeItem(backupKey(campaignId)) } catch { /* rien à effacer */ }
       setMessage({ tone: "ok", text: "Document enregistré : prêt à être donné aux joueurs et à partir dans Roll20." })

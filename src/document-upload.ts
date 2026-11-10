@@ -1,0 +1,105 @@
+import { DOCUMENT_RENDER_WIDTH } from "@/lib/document-model"
+
+import { canvasBlob, loadImage } from "./document-render"
+
+/**
+ * L'envoi d'un document à Eraser. Son serveur local (vinext) prend tout envoi de fichiers
+ * (`multipart/form-data`), même vers `/api/…`, pour une « action serveur » et le refuse au-delà
+ * de 1 Mo (413 Payload Too Large), avant même la route des documents. Or un rendu (WebP) et son
+ * impression (JPEG) font chacun de 0,4 à 1 Mo, et un fond importé bien plus.
+ *
+ * Chaque image est donc préparée pour tenir sous cette limite (la qualité baisse d'abord, la
+ * taille seulement si cela ne suffit pas), puis le document part en autant d'envois qu'il faut :
+ * le fond importé d'abord (le serveur le veut avant ou avec le rendu), puis le rendu et
+ * l'impression. Chaque envoi réécrit la même ligne du document ; le dernier fait foi.
+ */
+
+/** La limite du serveur d'Eraser (1 Mo), moins une marge. */
+const REQUEST_BUDGET = 1024 * 1024 - 16 * 1024
+/** En dessous, une image n'est plus réduite : elle part telle quelle. */
+const MIN_WIDTH = 480
+
+export type DocumentPart = { field: "background" | "render" | "print"; file: File }
+
+/** Ce qui reste pour une image dans un envoi, une fois le document (JSON) compté. */
+export function partBudget(documentJson: string) {
+  return REQUEST_BUDGET - new Blob([documentJson]).size - 2048
+}
+
+function scaledCanvas(source: HTMLCanvasElement, factor: number) {
+  const canvas = document.createElement("canvas")
+  canvas.width = Math.max(1, Math.round(source.width * factor))
+  canvas.height = Math.max(1, Math.round(source.height * factor))
+  const context = canvas.getContext("2d")
+  if (!context) throw new Error("Le navigateur ne peut pas dessiner le document.")
+  context.imageSmoothingQuality = "high"
+  context.drawImage(source, 0, 0, canvas.width, canvas.height)
+  return canvas
+}
+
+/** Le canvas en image d'au plus `maxBytes` : la qualité baisse d'abord, puis la taille. */
+export async function fittedBlob(canvas: HTMLCanvasElement, type: string, qualities: number[], maxBytes: number) {
+  let source = canvas
+  for (;;) {
+    let blob: Blob | null = null
+    for (const quality of qualities) {
+      blob = await canvasBlob(source, type, quality)
+      if (blob.size <= maxBytes) return blob
+      // Format de repli sans qualité réglable (PNG) : seule la taille peut encore baisser.
+      if (blob.type !== type) break
+    }
+    if (!blob || source.width * 0.8 < MIN_WIDTH) return blob ?? canvasBlob(source, type, qualities[0] ?? 0.9)
+    source = scaledCanvas(source, 0.8)
+  }
+}
+
+/**
+ * Le fond importé, prêt à partir : tel quel s'il tient dans un envoi, sinon redessiné (au plus
+ * la largeur du rendu, en WebP, qui garde la transparence) jusqu'à y tenir.
+ */
+export async function fittedBackground(file: File, maxBytes: number) {
+  if (file.size <= maxBytes) return file
+  const url = URL.createObjectURL(file)
+  try {
+    const image = await loadImage(url)
+    const width = image.naturalWidth || image.width
+    const height = image.naturalHeight || image.height
+    const scale = Math.min(1, DOCUMENT_RENDER_WIDTH / Math.max(1, width))
+    const canvas = document.createElement("canvas")
+    canvas.width = Math.max(1, Math.round(width * scale))
+    canvas.height = Math.max(1, Math.round(height * scale))
+    const context = canvas.getContext("2d")
+    if (!context) throw new Error("Le navigateur ne peut pas dessiner le document.")
+    context.imageSmoothingQuality = "high"
+    context.drawImage(image, 0, 0, canvas.width, canvas.height)
+    const blob = await fittedBlob(canvas, "image/webp", [0.9, 0.8, 0.7], maxBytes)
+    const extension = blob.type === "image/webp" ? "webp" : blob.type === "image/jpeg" ? "jpg" : "png"
+    return new File([blob], `${file.name.replace(/\.[^.]*$/, "") || "fond"}.${extension}`, { type: blob.type })
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
+function formOf(documentJson: string, parts: DocumentPart[]) {
+  const form = new FormData()
+  form.append("document", documentJson)
+  for (const part of parts) form.append(part.field, part.file)
+  return form
+}
+
+/** La taille exacte d'un envoi : le corps multipart tel que `fetch` l'enverra. */
+async function formSize(form: FormData) {
+  return (await new Response(form).blob()).size
+}
+
+/** Les envois d'un document, dans l'ordre : chacun sous la limite d'Eraser, le moins possible. */
+export async function documentForms(documentJson: string, parts: DocumentPart[]) {
+  const groups: DocumentPart[][] = []
+  for (const part of parts) {
+    const last = groups.at(-1)
+    if (last && await formSize(formOf(documentJson, [...last, part])) <= REQUEST_BUDGET) last.push(part)
+    else groups.push([part])
+  }
+  if (!groups.length) groups.push([])
+  return groups.map((group) => formOf(documentJson, group))
+}

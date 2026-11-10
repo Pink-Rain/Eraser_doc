@@ -14,6 +14,9 @@ est décrit dans la section « Extensions » de l'`ARCHITECTURE.md` d'Eraser.
   dans `src/document-assets.ts`, servis à côté du module). `src/main.tsx` exporte `Page`.
 - **Le rendu doit couper les lignes comme l'éditeur** : toute mise en forme ajoutée à l'éditeur
   l'est aussi au rendu, sinon l'image donnée aux joueurs ne ressemble plus à ce que le MJ a écrit.
+- **Un envoi à Eraser ne dépasse jamais 1 Mo** : son serveur (vinext) refuse au-delà (413) tout POST
+  `multipart/form-data`, même vers `/api/…`. Les images d'un document sont ajustées et réparties en
+  plusieurs envois par `src/document-upload.ts` ; tout nouvel envoi de fichiers passe par là.
 - Dans Eraser : le modèle pur (`lib/document-model.ts` : types, clés des polices et des fonds,
   nettoyage, marque d'inventaire, adresses ; emprunté), la feuille « Documents de campagne », les
   API (`/api/campaigns/<id>/documents…`, `?atelier=1` pour les données de l'éditeur), la lecture

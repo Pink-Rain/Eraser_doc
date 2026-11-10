@@ -1,6 +1,6 @@
 {
   "name": "eraser-doc",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Eraser Doc : l'éditeur des documents de campagne d'Eraser, publié comme extension.",
   "eraserExtension": {
