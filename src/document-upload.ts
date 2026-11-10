@@ -3,9 +3,11 @@ import { DOCUMENT_RENDER_WIDTH } from "@/lib/document-model"
 import { canvasBlob, loadImage } from "./document-render"
 
 /**
- * L'envoi d'un document à Eraser. Son serveur local (vinext) prend tout envoi de fichiers
- * (`multipart/form-data`), même vers `/api/…`, pour une « action serveur » et le refuse au-delà
- * de 1 Mo (413 Payload Too Large), avant même la route des documents. Or un rendu (WebP) et son
+ * L'envoi d'un document à Eraser. Le serveur local d'un Eraser d'avant l'alpha 286 (vinext) prend
+ * tout envoi de fichiers (`multipart/form-data`), même vers `/api/…`, pour une « action serveur »
+ * et le refuse au-delà de 1 Mo (413 Payload Too Large), avant même la route des documents ;
+ * depuis, il accepte 40 Mo et le dit (`features` : « envoi-unique ») : le document part alors en
+ * un seul envoi (une seule lecture et une seule écriture dans Google Sheets). Or un rendu (WebP) et son
  * impression (JPEG) font chacun de 0,4 à 1 Mo, et un fond importé bien plus.
  *
  * Chaque image est donc préparée pour tenir sous cette limite (la qualité baisse d'abord, la
@@ -14,8 +16,12 @@ import { canvasBlob, loadImage } from "./document-render"
  * calques de dessin, puis le rendu et l'impression. Chaque envoi réécrit la même ligne du document ; le dernier fait foi.
  */
 
-/** La limite du serveur d'Eraser (1 Mo), moins une marge. */
-const REQUEST_BUDGET = 1024 * 1024 - 16 * 1024
+/** La limite d'un Eraser d'avant l'alpha 286 (1 Mo par envoi), moins une marge. */
+export const SMALL_REQUESTS = 1024 * 1024 - 16 * 1024
+/** Un Eraser qui accepte un document entier en un envoi (`features` : « envoi-unique », 40 Mo). */
+export const LARGE_REQUESTS = 30 * 1024 * 1024
+/** Une image ne dépasse jamais ce qu'Eraser accepte (15 Mo), moins une marge. */
+const IMAGE_LIMIT = 14 * 1024 * 1024
 /** En dessous, une image n'est plus réduite : elle part telle quelle. */
 const MIN_WIDTH = 480
 
@@ -23,8 +29,8 @@ const MIN_WIDTH = 480
 export type DocumentPart = { field: "background" | "render" | "print" | `piece-${string}`; file: File }
 
 /** Ce qui reste pour une image dans un envoi, une fois le document (JSON) compté. */
-export function partBudget(documentJson: string) {
-  return REQUEST_BUDGET - new Blob([documentJson]).size - 2048
+export function partBudget(documentJson: string, limit = SMALL_REQUESTS) {
+  return Math.min(IMAGE_LIMIT, limit - new Blob([documentJson]).size - 2048)
 }
 
 function scaledCanvas(source: HTMLCanvasElement, factor: number) {
@@ -95,11 +101,11 @@ async function formSize(form: FormData) {
 }
 
 /** Les envois d'un document, dans l'ordre : chacun sous la limite d'Eraser, le moins possible. */
-export async function documentForms(documentJson: string, parts: DocumentPart[]) {
+export async function documentForms(documentJson: string, parts: DocumentPart[], limit = SMALL_REQUESTS) {
   const groups: DocumentPart[][] = []
   for (const part of parts) {
     const last = groups.at(-1)
-    if (last && await formSize(formOf(documentJson, [...last, part])) <= REQUEST_BUDGET) last.push(part)
+    if (last && await formSize(formOf(documentJson, [...last, part])) <= limit) last.push(part)
     else groups.push([part])
   }
   if (!groups.length) groups.push([])

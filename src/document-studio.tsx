@@ -33,7 +33,7 @@ import { backgroundSource, loadDocumentFonts, loadImage, renderDocumentCanvas } 
 import { DocumentStage, focusAt, zoneEditable, type BrushSettings, type LineSettings, type ShapeSettings, type StageTool } from "./document-stage"
 import { paragraphsFromElement } from "./document-text"
 import { BlendSelect, InkPicker, LayersPopover } from "./document-tools"
-import { documentForms, fittedBackground, fittedBlob, partBudget, type DocumentPart } from "./document-upload"
+import { LARGE_REQUESTS, SMALL_REQUESTS, documentForms, fittedBackground, fittedBlob, partBudget, type DocumentPart } from "./document-upload"
 
 /**
  * L'éditeur des documents (l'ancienne page Document d'Eraser) : les documents de la campagne
@@ -822,7 +822,11 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
       const image = backgroundSrc ? await loadImage(backgroundSrc) : null
       const documentJson = JSON.stringify({ id: snapshot.id, title: snapshot.title, sessionId: snapshot.sessionId, background: snapshot.background, content: snapshot.content, folder: snapshot.folder, template: snapshot.template })
       // Chaque image tient dans un envoi (Eraser refuse plus de 1 Mo par envoi : document-upload.ts).
-      const budget = partBudget(documentJson)
+      // Un seul envoi quand Eraser l'accepte ; sinon, des envois de 1 Mo au plus.
+      const requestLimit = features.includes("envoi-unique") ? LARGE_REQUESTS : SMALL_REQUESTS
+      const budget = partBudget(documentJson, requestLimit)
+      // Les images importées restent légères (l'éditeur les relit à chaque ouverture).
+      const imageBudget = Math.min(budget, 4 * 1024 * 1024)
 
       // Les calques de dessin touchés (ou pas encore chez Eraser) sont aplatis en une image.
       const uploads = { ...snapshot.uploads }
@@ -836,7 +840,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
         const src = previews[picture.asset] || (snapshot.remote.includes(picture.asset) && !snapshot.isNew ? pieceUrl(campaignId, snapshot.id, picture.asset, snapshot.updatedAt) : "")
         const base = src ? await loadImage(src).catch(() => null) : null
         const canvas = flattenDrawing(base, layer ?? { width: base?.naturalWidth || picture.width * DRAWING_SCALE, height: base?.naturalHeight || picture.height * DRAWING_SCALE, strokes: [] })
-        const blob = await fittedBlob(canvas, "image/webp", [0.92, 0.85, 0.75], budget)
+        const blob = await fittedBlob(canvas, "image/webp", [0.92, 0.85, 0.75], imageBudget)
         uploads[picture.asset] = blob
         if (previews[picture.asset]?.startsWith("blob:")) URL.revokeObjectURL(previews[picture.asset])
         previews[picture.asset] = URL.createObjectURL(blob)
@@ -861,14 +865,14 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
       }
       const render = await fittedBlob(await renderDocumentCanvas(snapshot.content, image, DOCUMENT_RENDER_WIDTH, "", pictures), "image/webp", [0.9, 0.8, 0.7], budget)
       const print = await fittedBlob(await renderDocumentCanvas(snapshot.content, image, DOCUMENT_RENDER_WIDTH, "#ffffff", pictures), "image/jpeg", [0.9, 0.8, 0.7], budget)
-      const background = snapshot.uploadFile ? await fittedBackground(snapshot.uploadFile, budget) : null
+      const background = snapshot.uploadFile ? await fittedBackground(snapshot.uploadFile, imageBudget) : null
       const pieces: DocumentPart[] = []
       for (const asset of assetsOf(snapshot.content)) {
         // Seules les pièces nouvelles ou redessinées partent ; les autres sont déjà chez Eraser.
         const pending = uploads[asset]
         if (!pending) continue
         const file = pending instanceof File ? pending : new File([pending], `${asset}.webp`, { type: pending.type || "image/webp" })
-        pieces.push({ field: `piece-${asset}`, file: await fittedBackground(file, budget, /^image\/(webp|png|jpeg|gif)$/) })
+        pieces.push({ field: `piece-${asset}`, file: await fittedBackground(file, imageBudget, /^image\/(webp|png|jpeg|gif)$/) })
       }
       setSaving("upload")
       const parts: DocumentPart[] = [
@@ -880,7 +884,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
       let stored: CampaignDocumentRecord | null = null
       let backgroundSent = false
       const sent = new Set<string>()
-      for (const form of await documentForms(documentJson, parts)) {
+      for (const form of await documentForms(documentJson, parts, requestLimit)) {
         const response = await fetch(`/api/campaigns/${encodeURIComponent(campaignId)}/documents`, { method: "POST", body: form })
         const payload = (await response.json().catch(() => ({}))) as { document?: CampaignDocumentRecord; error?: string }
         if (!response.ok || !payload.document) {

@@ -36,3 +36,13 @@ test("chaque image est préparée pour tenir dans un envoi, document compris", (
   assert.ok(budget > 900_000 && budget + new Blob([json]).size < LIMIT);
   assert.ok(upload.partBudget(json + "x".repeat(48_000)) < budget - 47_000);
 });
+
+test("avec un Eraser qui l'accepte, tout le document part en un seul envoi, images en pleine qualité", async () => {
+  const parts = [part("background", 900_000), part("piece-sceau", 300_000), part("render", 700_000), part("print", 970_000, "image/jpeg")];
+  const forms = await upload.documentForms(json, parts, upload.LARGE_REQUESTS);
+  assert.deepEqual(forms.map(fields), [["background", "render", "print"]]);
+  assert.ok(forms[0].has("piece-sceau"));
+  // Une image n'est pas allégée pour tenir dans 1 Mo, mais ne dépasse jamais ce qu'Eraser accepte.
+  const budget = upload.partBudget(json, upload.LARGE_REQUESTS);
+  assert.ok(budget > 10_000_000 && budget < 15 * 1024 * 1024);
+});

@@ -28,9 +28,11 @@ est décrit dans la section « Extensions » de l'`ARCHITECTURE.md` d'Eraser.
   modèle (liste, fonction) n'existe pas dans un Eraser plus ancien, qui prête quand même l'ancien
   module. L'éditeur lit `features` (`?atelier=1`) et ne propose un outil que si Eraser sait le
   garder (`calques`, `formes`, `dossiers`, `modeles`).
-- **Un envoi à Eraser ne dépasse jamais 1 Mo** : son serveur (vinext) refuse au-delà (413) tout POST
-  `multipart/form-data`, même vers `/api/…`. Les images d'un document sont ajustées et réparties en
-  plusieurs envois par `src/document-upload.ts` ; tout nouvel envoi de fichiers passe par là.
+- **Les envois de fichiers passent par `src/document-upload.ts`** : avant l'alpha 286, le serveur
+  d'Eraser (vinext) refusait (413) tout POST `multipart/form-data` de plus de 1 Mo, même vers
+  `/api/…` ; les images y sont alors ajustées et réparties en plusieurs envois. Depuis, Eraser
+  accepte 40 Mo et annonce `envoi-unique` dans `features` : tout part en un envoi (une seule
+  lecture et écriture dans Google Sheets). Une image importée reste sous 4 Mo.
 - Dans Eraser : le modèle pur (`lib/document-model.ts` : types, clés des polices et des fonds,
   nettoyage, marque d'inventaire, adresses ; emprunté), la feuille « Documents de campagne », les
   API (`/api/campaigns/<id>/documents…`, `?atelier=1` pour les données de l'éditeur), la lecture
