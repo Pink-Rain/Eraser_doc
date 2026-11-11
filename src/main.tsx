@@ -33,7 +33,7 @@ type StudioData = {
   campaign: { id: string; name: string }
   documents: CampaignDocumentRecord[]
   sessions: Array<{ id: string; name: string }>
-  /** À qui donner un document : les joueurs, puis (Eraser alpha 288 et plus) les marchands et les autres PNJ. */
+  /** À qui donner un document : les joueurs, puis (Eraser alpha 288 et plus) les marchands (les magasins, pour l'y vendre) et les PNJ. */
   players: DocumentRecipient[]
   merchants?: DocumentRecipient[]
   npcs?: DocumentRecipient[]
@@ -60,7 +60,7 @@ function CampaignDocuments({ eraser, campaignId }: { eraser: EraserContext; camp
       <div className="w-full flex-1 px-5 py-9 sm:px-8 md:py-14">
         <p className="text-xs font-semibold uppercase tracking-[0.22em] text-primary/75">{data.campaign.name}</p>
         <h1 className="mt-3 font-display text-4xl font-semibold sm:text-5xl">Document</h1>
-        <p className="mt-2 max-w-3xl text-sm text-muted-foreground">Lettres, parchemins, pages de grimoire : écris-les sur un ou plusieurs fonds, page après page, donne-les aux joueurs, aux marchands ou aux PNJ pendant la session (ils les lisent depuis leur inventaire, page par page) et envoie-les dans Roll20 avec le compagnon (handout et PDF).</p>
+        <p className="mt-2 max-w-3xl text-sm text-muted-foreground">Lettres, parchemins, pages de grimoire : écris-les sur un ou plusieurs fonds, page après page, donne-les aux joueurs ou aux PNJ, mets-les en vente chez un marchand, montre-les dans le journal de la session (ils les lisent page par page) et envoie-les dans Roll20 avec le compagnon (handout et PDF).</p>
         <DocumentStudio
           campaignId={data.campaign.id}
           initialDocuments={data.documents}

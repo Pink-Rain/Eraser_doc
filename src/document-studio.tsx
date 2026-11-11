@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   AlignCenter, AlignJustify, AlignLeft, AlignRight, AlignVerticalJustifyCenter, AlignVerticalJustifyEnd, AlignVerticalJustifyStart,
-  ArrowDownToLine, ArrowUpToLine, Bold, Check, ChevronLeft, ChevronRight, Circle, Copy, CopyPlus, Diamond, Eraser, Eye, FileImage, FilePlus2, FileText, Folder, Frame, ImagePlus, Italic,
+  ArrowDownToLine, ArrowUpToLine, Bold, Check, ChevronLeft, ChevronRight, Circle, Copy, CopyPlus, Diamond, Eraser, Eye, EyeOff, FileImage, FilePlus2, FileText, Folder, Frame, ImagePlus, Italic,
   LayoutTemplate, Link2, LoaderCircle, Minus, MousePointer2, MoveLeft, MoveRight, PenTool, Plus, Redo2, RotateCcw, Save, Shapes, Slash, Square, Star, Strikethrough, Trash2,
   Triangle, TriangleAlert, Type, Underline, Undo2, Upload,
 } from "lucide-react"
@@ -43,8 +43,9 @@ import { LARGE_REQUESTS, SMALL_REQUESTS, documentForms, fittedBackground, fitted
  * gomme), chacun avec son mode de fusion. Un document peut avoir plusieurs pages, chacune sur son
  * fond (le même ou un autre) : la barre des pages en ajoute, en duplique, les déplace et passe de
  * l'une à l'autre.
- * « Enregistrer » dessine chaque page : ce sont ces images que reçoivent les joueurs, les marchands
- * et les PNJ (« Donner à… », lues page par page avec des flèches) et Roll20 (handout et PDF, par le
+ * « Enregistrer » dessine chaque page : ce sont ces images que lisent, page par page avec des
+ * flèches, les joueurs et les PNJ qui le reçoivent (« Donner à… »), ceux qui l'achètent chez un
+ * marchand, ceux qui l'ouvrent dans le journal de la session, et Roll20 (handout et PDF, par le
  * compagnon).
  */
 
@@ -308,7 +309,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   /** Ce que le serveur d'Eraser sait garder (`dossiers`, `modeles`, `calques`, `pages`…). */
   features?: string[]
   sessions: Array<{ id: string; name: string }>
-  /** À qui donner un document : les joueurs, les marchands (le PNJ d'un magasin), les autres PNJ. */
+  /** À qui donner un document : les joueurs, les marchands (les magasins, pour l'y vendre), les PNJ. */
   players: DocumentRecipient[]
   merchants?: DocumentRecipient[]
   npcs?: DocumentRecipient[]
@@ -320,6 +321,8 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   const shapesOn = features.includes("formes")
   const foldersOn = features.includes("dossiers")
   const templatesOn = features.includes("modeles")
+  // « journal » : Eraser sait montrer un document aux joueurs dans le journal de sa session.
+  const journalOn = features.includes("journal")
   // Sans « pages », l'Eraser installé ne garde que la première page : l'éditeur n'en propose pas d'autre.
   const pagesOn = features.includes("pages")
   const [documents, setDocuments] = useState(initialDocuments)
@@ -977,7 +980,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   /* ----- dossiers et modèles ----- */
 
   /** Range un document sans le redessiner (dossier, modèle) : tout de suite chez Eraser s'il y est déjà. */
-  async function place(document: { id: string; isNew?: boolean }, change: { folder?: string; template?: boolean }) {
+  async function place(document: { id: string; isNew?: boolean }, change: { folder?: string; template?: boolean; journal?: boolean }) {
     if (document.isNew) {
       setDraft((current) => current && current.id === document.id ? { ...current, ...change } : current)
       return
@@ -1206,6 +1209,9 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
 
   const anyOverflow = selectedZone ? overflowing[selectedZone.id] : false
   const saved = draft && !draft.isNew ? documents.find((document) => document.id === draft.id) : undefined
+  // Le journal de la session (catégorie Objets) : seulement pour la session où le document est enregistré.
+  const inSavedSession = Boolean(saved && draft?.sessionId && saved.sessionId === draft.sessionId)
+  const inJournal = inSavedSession && saved?.journal === saved?.sessionId
   const zoneTools = tool === "select" && (selectedZone || !anySelected)
   const shapeKindOptions = shapeKinds.map((kind) => ({ value: kind.value, label: "", icon: shapeIcons[kind.value], title: kind.label }))
   const hints: Record<StageTool, string> = {
@@ -1247,7 +1253,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
         <div>
           <FileText className="mx-auto size-9 text-primary/40" />
           <p className="mt-3 font-display text-2xl font-semibold">{documents.length ? "Choisis un document" : "Aucun document"}</p>
-          <p className="mt-1 text-sm text-muted-foreground">Une lettre, un parchemin, une page de grimoire : écris-le sur un fond (sur une ou plusieurs pages), puis donne-le à un joueur, à un marchand ou à un PNJ, ou envoie-le dans Roll20.</p>
+          <p className="mt-1 text-sm text-muted-foreground">Une lettre, un parchemin, une page de grimoire : écris-le sur un fond (sur une ou plusieurs pages), puis donne-le à un joueur ou à un PNJ, mets-le en vente chez un marchand, ou envoie-le dans Roll20.</p>
           <Button type="button" className="mt-5" onClick={() => setChoosing(true)}><Plus />Écrire un document</Button>
         </div>
       </div> : <>
@@ -1258,6 +1264,10 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
             <NativeSelectOption value="">Aucune session</NativeSelectOption>
             {[...sessions].reverse().map((session) => <NativeSelectOption key={session.id} value={session.id}>{session.name}</NativeSelectOption>)}
           </NativeSelect>
+          {journalOn && draft.sessionId && <Button type="button" variant={inJournal ? "secondary" : "ghost"} size="icon" aria-pressed={inJournal} disabled={!inSavedSession || !saved}
+            title={!inSavedSession ? "Enregistre d’abord le document dans cette session, puis montre-le aux joueurs" : inJournal ? "Visible des joueurs dans le journal de la session (Objets) : cliquer pour le cacher" : "Caché aux joueurs : cliquer pour le montrer dans le journal de la session (Objets)"}
+            aria-label={inJournal ? "Cacher le document du journal de la session" : "Montrer le document dans le journal de la session"}
+            onClick={() => saved && void place(saved, { journal: !inJournal })}>{inJournal ? <Eye /> : <EyeOff />}</Button>}
           {foldersOn && <span className="flex items-center gap-1" title="Le dossier où ranger ce document">
             <Folder className="size-4 text-muted-foreground" />
             <NativeSelect value={draft.folder} onChange={(event) => chooseFolder(event.target.value)} aria-label="Dossier du document">

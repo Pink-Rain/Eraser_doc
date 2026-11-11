@@ -36,8 +36,11 @@ est décrit dans la section « Extensions » de l'`ARCHITECTURE.md` d'Eraser.
 - **Seuls les types viennent du modèle d'Eraser pour les nouveautés** : une valeur nouvelle du
   modèle (liste, fonction) n'existe pas dans un Eraser plus ancien, qui prête quand même l'ancien
   module. L'éditeur lit `features` (`?atelier=1`) et ne propose un outil que si Eraser sait le
-  garder (`calques`, `formes`, `dossiers`, `modeles`, `pages`). « Donner à… » reçoit de
-  `?atelier=1` les `players`, puis les `merchants` et les `npcs` (absents d'un Eraser plus ancien).
+  garder (`calques`, `formes`, `dossiers`, `modeles`, `pages`, `journal`). « Donner à… » (prêté
+  par Eraser) reçoit de `?atelier=1` les `players`, puis les `merchants` (les magasins
+  sauvegardés : le document y est mis en vente) et les `npcs` (absents d'un Eraser plus ancien).
+  L'œil du journal (`journal`) s'enregistre tout seul (`PATCH { journal }`), pour la session où le
+  document est enregistré.
 - **Les envois de fichiers passent par `src/document-upload.ts`** : avant l'alpha 286, le serveur
   d'Eraser (vinext) refusait (413) tout POST `multipart/form-data` de plus de 1 Mo, même vers
   `/api/…` ; les images y sont alors ajustées et réparties en plusieurs envois. Depuis, Eraser

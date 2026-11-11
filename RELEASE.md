@@ -1,4 +1,4 @@
-# Eraser Doc 0.3.0 — Plusieurs pages, et des documents pour les marchands et les PNJ
+# Eraser Doc 0.3.0 — Plusieurs pages, en vente chez les marchands, dans le journal
 
 Avec Eraser 0.1.1-alpha.288 ou plus récent :
 
@@ -13,8 +13,11 @@ Avec Eraser 0.1.1-alpha.288 ou plus récent :
 - **Ça reste un seul document.** « Enregistrer » dessine toutes les pages : les joueurs les lisent
   page par page avec de petites flèches (et ← →), le PDF les contient toutes, Roll20 reçoit un
   handout (la première page) et le PDF complet.
-- **« Donner à… » : joueurs, marchands, puis PNJ.** Un marchand (le PNJ d'un magasin sauvegardé)
-  ou un autre PNJ reçoit le document dans son Sac à dos.
+- **« Donner à… » : joueurs, marchands, puis PNJ.** Chez un marchand (un magasin sauvegardé), le
+  document est mis en vente : un prix, des exemplaires, et le voilà en rayon ; un joueur qui
+  l'achète le reçoit prêt à être lu. Un PNJ le reçoit dans son Sac à dos.
+- **Le journal de la session.** À côté de la session du document, un œil le montre aux joueurs
+  dans le journal de cette session (catégorie Objets) ou le leur cache (caché au départ).
 - La liste des documents dit combien de pages a chacun ; dupliquer un document ou partir d'un
   modèle recopie toutes ses pages.
 
