@@ -97,6 +97,7 @@ export function DocumentLibrary({ campaignId, documents, currentId, emptyFolders
       <span className="flex items-center gap-1 truncate text-[11px] text-muted-foreground">
         {document.template && <span className="inline-flex items-center gap-0.5 text-primary"><LayoutTemplate className="size-3" />Modèle ·</span>}
         {sessionName(document.sessionId) || "Sans session"}
+        {(document.pages?.length ?? 0) > 0 && <span className="shrink-0">· {1 + (document.pages?.length ?? 0)} pages</span>}
       </span>
     </span>
   </button>

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   AlignCenter, AlignJustify, AlignLeft, AlignRight, AlignVerticalJustifyCenter, AlignVerticalJustifyEnd, AlignVerticalJustifyStart,
-  ArrowDownToLine, ArrowUpToLine, Bold, Check, Circle, Copy, CopyPlus, Diamond, Eraser, Eye, FileImage, FileText, Folder, Frame, ImagePlus, Italic,
-  LayoutTemplate, Link2, LoaderCircle, Minus, MousePointer2, PenTool, Plus, Redo2, RotateCcw, Save, Shapes, Slash, Square, Star, Strikethrough, Trash2,
+  ArrowDownToLine, ArrowUpToLine, Bold, Check, ChevronLeft, ChevronRight, Circle, Copy, CopyPlus, Diamond, Eraser, Eye, FileImage, FilePlus2, FileText, Folder, Frame, ImagePlus, Italic,
+  LayoutTemplate, Link2, LoaderCircle, Minus, MousePointer2, MoveLeft, MoveRight, PenTool, Plus, Redo2, RotateCcw, Save, Shapes, Slash, Square, Star, Strikethrough, Trash2,
   Triangle, TriangleAlert, Type, Underline, Undo2, Upload,
 } from "lucide-react"
 
@@ -18,14 +18,14 @@ import { replaceAppUrl } from "@/components/eraser/app-tabs"
 import {
   DEFAULT_INK, DOCUMENT_RENDER_WIDTH, DOCUMENT_WIDTH, builtinBackgroundKeys, cleanDocumentContent, documentFontKeys,
   documentImageUrl, documentStudioHref,
-  type BuiltinBackgroundKey, type CampaignDocumentRecord, type DocumentAlign, type DocumentBackground, type DocumentContent,
+  type BuiltinBackgroundKey, type CampaignDocumentRecord, type DocumentAlign, type DocumentBackground, type DocumentContent, type DocumentPage, type DocumentRecipient,
   type DocumentLine, type DocumentLineStyle, type DocumentParagraph, type DocumentPicture, type DocumentShape, type DocumentShapeFill, type DocumentShapeKind, type DocumentVerticalAlign, type DocumentZone,
 } from "@/lib/document-model"
 import { cn } from "@/lib/utils"
 
 import { builtinBackgrounds, documentFonts, documentFromBuiltin, documentOnOwnBackground, newDocumentZone } from "./document-assets"
 import {
-  DRAWING_SCALE, flattenDrawing, shapeKinds, movedInOrder, newDocumentLine, newDocumentShape, normalizeContent, pieceUrl, withElementOnTop, withoutElement, zoneBlend,
+  DRAWING_SCALE, continuedContent, copiedContent, flattenDrawing, shapeKinds, movedInOrder, newDocumentLine, newDocumentShape, normalizeContent, pieceUrl, withElementOnTop, withoutElement, zoneBlend,
   type Paint, type Stroke,
 } from "./document-elements"
 import { DocumentLibrary, folderNames } from "./document-library"
@@ -40,10 +40,23 @@ import { LARGE_REQUESTS, SMALL_REQUESTS, documentForms, fittedBackground, fitted
  * (parchemins, lettres, livres…), rangés en dossiers, et leur éditeur. On choisit un fond (fourni,
  * depuis l'ordinateur, une adresse ou un modèle), on pose des zones de texte, des lignes, des
  * formes (remplies, en dégradé), des images et des calques de dessin (plume calligraphique,
- * gomme), chacun avec son mode de fusion.
- * « Enregistrer » dessine le document : c'est cette image que reçoivent les joueurs (« Donner
- * à… ») et Roll20 (handout et PDF, par le compagnon).
+ * gomme), chacun avec son mode de fusion. Un document peut avoir plusieurs pages, chacune sur son
+ * fond (le même ou un autre) : la barre des pages en ajoute, en duplique, les déplace et passe de
+ * l'une à l'autre.
+ * « Enregistrer » dessine chaque page : ce sont ces images que reçoivent les joueurs, les marchands
+ * et les PNJ (« Donner à… », lues page par page avec des flèches) et Roll20 (handout et PDF, par le
+ * compagnon).
  */
+
+/** Une page du brouillon : son fond et son contenu. */
+type DraftPage = {
+  id: string
+  background: DocumentBackground
+  content: DocumentContent
+  /** Le fond choisi sur l'ordinateur (ou repris d'une autre page), pas encore envoyé, et son aperçu. */
+  uploadFile: Blob | null
+  uploadPreview: string
+}
 
 type Draft = {
   id: string
@@ -52,11 +65,15 @@ type Draft = {
   sessionId: string
   folder: string
   template: boolean
-  background: DocumentBackground
-  content: DocumentContent
-  /** Le fond choisi sur l'ordinateur, pas encore envoyé, et son aperçu. */
-  uploadFile: File | null
-  uploadPreview: string
+  /** Les pages dans l'ordre : la première est celle que lisent aussi les versions d'Eraser sans pages. */
+  pages: DraftPage[]
+  /** La page ouverte dans l'éditeur. */
+  page: number
+  /**
+   * Où Eraser range le fond importé de chaque page au dernier enregistrement (`fond` pour la
+   * première page, `fond-<id>` pour les autres). Hors de l'historique : annuler n'y change rien.
+   */
+  savedFonds: Record<string, string>
   /** Les pièces (images posées, calques de dessin aplatis) pas encore envoyées, par nom. */
   uploads: Record<string, Blob>
   /** Les adresses à afficher pour des pièces (aperçus locaux, ou l'image d'un autre document). */
@@ -69,22 +86,65 @@ type Draft = {
   updatedAt: string
 }
 
-type Snapshot = { content: DocumentContent; paint: Record<string, Paint> }
-type Player = { id: string; name: string }
+/** Annuler revient aussi sur les pages : celles d'alors, et celle qui était ouverte. */
+type Snapshot = { pages: DraftPage[]; page: number; paint: Record<string, Paint> }
 type Message = { tone: "ok" | "error"; text: string } | null
+
+/** Les pages d'un document (la première comprise), comme Eraser le garde : 30 au plus. */
+const MAX_PAGES = 30
 
 const strokeCount = (paint: Record<string, Paint>) => Object.entries(paint).map(([id, layer]) => `${id}:${layer.strokes.length}`).sort()
 // Le dossier et le modèle s'enregistrent tout seuls (sans redessiner) : ils ne rendent pas le document « modifié ».
-const signature = (draft: Draft | null) => draft ? JSON.stringify({ title: draft.title, sessionId: draft.sessionId, background: draft.background, content: draft.content, upload: draft.uploadFile ? `${draft.uploadFile.name}:${draft.uploadFile.size}` : "", uploads: Object.keys(draft.uploads).sort(), paint: strokeCount(draft.paint) }) : ""
+const signature = (draft: Draft | null) => draft ? JSON.stringify({
+  title: draft.title, sessionId: draft.sessionId,
+  pages: draft.pages.map((page) => ({ id: page.id, background: page.background, content: page.content, upload: page.uploadFile ? `${page.uploadFile.size}:${page.uploadFile.type}` : "" })),
+  uploads: Object.keys(draft.uploads).sort(), paint: strokeCount(draft.paint),
+}) : ""
 const assetsOf = (content: DocumentContent) => [...new Set((content.pictures ?? []).map((picture) => picture.asset))]
+/** Les pièces de toutes les pages. */
+const assetsOfPages = (pages: ReadonlyArray<{ content: DocumentContent }>) => [...new Set(pages.flatMap((page) => assetsOf(page.content)))]
+/** La page ouverte (toujours une page qui existe). */
+const pageIndex = (draft: Pick<Draft, "page" | "pages">) => Math.min(Math.max(0, draft.page), draft.pages.length - 1)
+const openPage = (draft: Draft) => draft.pages[pageIndex(draft)]
+function withPage(draft: Draft, change: (page: DraftPage) => DraftPage): Draft {
+  const index = pageIndex(draft)
+  return { ...draft, pages: draft.pages.map((page, at) => at === index ? change(page) : page) }
+}
+const withContent = (draft: Draft, change: (content: DocumentContent) => DocumentContent) => withPage(draft, (page) => ({ ...page, content: change(page.content) }))
+/** Où Eraser range le fond importé d'une page selon sa place : `fond` pour la première. */
+const fondPart = (index: number, pageId: string) => index ? `fond-${pageId}` : "fond"
+/** Les fonds importés d'un document tel qu'enregistré, par page. */
+const savedFondsOf = (pages: ReadonlyArray<Pick<DraftPage, "id" | "background">>) => Object.fromEntries(pages.flatMap((page, index) => page.background.kind === "upload" ? [[page.id, fondPart(index, page.id)]] : []))
+
+/** L'identifiant de la première page (Eraser ne lui en garde pas) : le même à chaque ouverture. */
+function firstPageId(rest: ReadonlyArray<{ id: string }>) {
+  const taken = new Set(rest.map((page) => page.id))
+  let id = "page-1"
+  for (let index = 2; taken.has(id); index += 1) id = `page-1-${index}`
+  return id
+}
+
+function draftPagesOf(document: Pick<CampaignDocumentRecord, "background" | "content"> & { pages?: DocumentPage[] }): DraftPage[] {
+  const rest = Array.isArray(document.pages) ? document.pages : []
+  return [
+    { id: firstPageId(rest), background: document.background, content: normalizeContent(document.content), uploadFile: null, uploadPreview: "" },
+    ...rest.map((page) => ({ id: page.id, background: page.background, content: normalizeContent(page.content), uploadFile: null, uploadPreview: "" })),
+  ]
+}
 
 function draftOf(document: CampaignDocumentRecord): Draft {
-  const content = normalizeContent(document.content)
+  const pages = draftPagesOf(document)
   return {
     id: document.id, isNew: false, title: document.title, sessionId: document.sessionId, folder: document.folder ?? "", template: Boolean(document.template),
-    background: document.background, content, uploadFile: null, uploadPreview: "", uploads: {}, previews: {}, remote: assetsOf(content), paint: {},
+    pages, page: 0, savedFonds: savedFondsOf(pages), uploads: {}, previews: {}, remote: assetsOfPages(pages), paint: {},
     renderVersion: document.renderVersion, updatedAt: document.updatedAt,
   }
+}
+
+/** Une page neuve sur ce fond : les zones prêtes à remplir du fond fourni, ou une zone pour un autre fond. */
+function newDraftPage(background: DocumentBackground, file?: Blob | null): DraftPage {
+  const content = background.kind === "builtin" ? documentFromBuiltin(background.key) : documentOnOwnBackground()
+  return { id: crypto.randomUUID(), background, content, uploadFile: file ?? null, uploadPreview: file ? URL.createObjectURL(file) : "" }
 }
 
 /** Le choix « Nouveau dossier… » du menu des dossiers (un nom de dossier ne commence jamais par un espace). */
@@ -96,9 +156,17 @@ function readBackup(campaignId: string): (Draft & { savedAt: string }) | null {
   try {
     const raw = window.localStorage.getItem(backupKey(campaignId))
     if (!raw) return null
-    const parsed = JSON.parse(raw) as Draft & { savedAt: string }
-    if (!parsed?.id || parsed.background?.kind === "upload" && parsed.isNew) return null
-    return { ...parsed, folder: parsed.folder ?? "", template: Boolean(parsed.template), content: normalizeContent(cleanDocumentContent(parsed.content)), uploadFile: null, uploadPreview: "", uploads: {}, previews: {}, remote: parsed.remote ?? [], paint: parsed.paint ?? {} }
+    // Un brouillon d'avant les pages n'avait qu'un fond et un contenu.
+    const { background, content, uploadFile: _file, uploadPreview: _preview, ...parsed } = JSON.parse(raw) as Draft & { savedAt: string; background?: DocumentBackground; content?: DocumentContent; uploadFile?: unknown; uploadPreview?: unknown }
+    if (!parsed?.id) return null
+    const kept = Array.isArray(parsed.pages) && parsed.pages.length ? parsed.pages : [{ id: "page-1", background, content }]
+    const pages: DraftPage[] = kept.slice(0, MAX_PAGES).map((page) => ({
+      id: typeof page?.id === "string" && /^[\w-]{1,80}$/.test(page.id) ? page.id : crypto.randomUUID(),
+      background: page?.background ?? { kind: "builtin", key: "parchemin" },
+      content: normalizeContent(cleanDocumentContent(page?.content)),
+      uploadFile: null, uploadPreview: "",
+    }))
+    return { ...parsed, folder: parsed.folder ?? "", template: Boolean(parsed.template), pages, page: Math.min(Math.max(0, Number(parsed.page) || 0), pages.length - 1), savedFonds: {}, uploads: {}, previews: {}, remote: parsed.remote ?? [], paint: parsed.paint ?? {} }
   } catch { return null }
 }
 
@@ -137,6 +205,12 @@ function fillPreview(shape: ShapeSettings) {
   if (shape.fill === "solid") return shape.fillColor
   const end = `color-mix(in srgb, ${shape.fillColor2} ${Math.round(shape.fillOpacity2 * 100)}%, transparent)`
   return shape.fill === "radial" ? `radial-gradient(circle, ${shape.fillColor}, ${end})` : `linear-gradient(${shape.gradientAngle + 90}deg, ${shape.fillColor}, ${end})`
+}
+
+/** La hauteur d'une page dont le fond mesure `width` × `height` (en unités du document). */
+function heightOf(width: number, height: number) {
+  if (!(width > 0 && height > 0)) return 0
+  return Math.min(DOCUMENT_WIDTH * 4, Math.max(DOCUMENT_WIDTH * 0.2, Math.round((DOCUMENT_WIDTH * height / width) * 10) / 10))
 }
 
 /** Une image lue (aperçu d'une pièce, image posée) : sa taille naturelle. */
@@ -226,15 +300,18 @@ function BackgroundChoices({ onBuiltin, onFile, onUrl, compact = false }: { onBu
 
 /* ---------- la page ---------- */
 
-export function DocumentStudio({ campaignId, initialDocuments, initialTemplates = [], features = [], sessions, players, initialDocumentId = "", initialSessionId = "", startNew = false }: {
+export function DocumentStudio({ campaignId, initialDocuments, initialTemplates = [], features = [], sessions, players, merchants = [], npcs = [], initialDocumentId = "", initialSessionId = "", startNew = false }: {
   campaignId: string
   initialDocuments: CampaignDocumentRecord[]
   /** Les modèles du compte, dans toutes ses campagnes. */
   initialTemplates?: CampaignDocumentRecord[]
-  /** Ce que le serveur d'Eraser sait garder (`dossiers`, `modeles`, `calques`). */
+  /** Ce que le serveur d'Eraser sait garder (`dossiers`, `modeles`, `calques`, `pages`…). */
   features?: string[]
   sessions: Array<{ id: string; name: string }>
-  players: Player[]
+  /** À qui donner un document : les joueurs, les marchands (le PNJ d'un magasin), les autres PNJ. */
+  players: DocumentRecipient[]
+  merchants?: DocumentRecipient[]
+  npcs?: DocumentRecipient[]
   initialDocumentId?: string
   initialSessionId?: string
   startNew?: boolean
@@ -243,6 +320,8 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   const shapesOn = features.includes("formes")
   const foldersOn = features.includes("dossiers")
   const templatesOn = features.includes("modeles")
+  // Sans « pages », l'Eraser installé ne garde que la première page : l'éditeur n'en propose pas d'autre.
+  const pagesOn = features.includes("pages")
   const [documents, setDocuments] = useState(initialDocuments)
   const [templates, setTemplates] = useState(initialTemplates)
   const [draft, setDraft] = useState<Draft | null>(() => {
@@ -271,16 +350,20 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   const [emptyFolders, setEmptyFolders] = useState<string[]>([])
   const [newFolderFor, setNewFolderFor] = useState<string | null>(null)
   const [copying, setCopying] = useState(false)
+  const [addingPage, setAddingPage] = useState(false)
   const lastHistory = useRef({ key: "", at: 0 })
   const focusSnapshot = useRef<{ id: string; snapshot: Snapshot; text: string } | null>(null)
   const imageInput = useRef<HTMLInputElement>(null)
 
   const dirty = Boolean(draft) && signature(draft) !== savedSignature
-  const zones = useMemo(() => draft?.content.zones ?? [], [draft])
+  /** La page ouverte et son contenu : tout ce que l'éditeur pose, déplace ou règle y est. */
+  const page = draft ? openPage(draft) : null
+  const pageCount = draft?.pages.length ?? 0
+  const zones = useMemo(() => page?.content.zones ?? [], [page])
   const selectedZone = zones.find((zone) => zone.id === selectedId) ?? null
-  const selectedLine = draft?.content.lines.find((line) => line.id === selectedId) ?? null
-  const selectedPicture = draft?.content.pictures.find((picture) => picture.id === selectedId) ?? null
-  const selectedShape = draft?.content.shapes.find((shape) => shape.id === selectedId) ?? null
+  const selectedLine = page?.content.lines.find((line) => line.id === selectedId) ?? null
+  const selectedPicture = page?.content.pictures.find((picture) => picture.id === selectedId) ?? null
+  const selectedShape = page?.content.shapes.find((shape) => shape.id === selectedId) ?? null
   const anySelected = Boolean(selectedZone || selectedLine || selectedPicture || selectedShape)
   const sessionName = (id: string) => sessions.find((session) => session.id === id)?.name ?? ""
   const folders = folderNames(documents, emptyFolders)
@@ -302,7 +385,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
     if (!draft || !dirty) return
     const timer = window.setTimeout(() => {
       try {
-        window.localStorage.setItem(backupKey(campaignId), JSON.stringify({ ...draft, uploadFile: null, uploadPreview: "", uploads: {}, previews: {}, savedAt: new Date().toISOString() }))
+        window.localStorage.setItem(backupKey(campaignId), JSON.stringify({ ...draft, pages: draft.pages.map((page) => ({ ...page, uploadFile: null, uploadPreview: "" })), uploads: {}, previews: {}, savedAt: new Date().toISOString() }))
       } catch { /* stockage plein : le brouillon n'est pas gardé */ }
     }, 800)
     return () => window.clearTimeout(timer)
@@ -324,7 +407,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
 
   /* ----- modifier, avec annuler ----- */
 
-  const snapshotOf = (current: Draft): Snapshot => ({ content: current.content, paint: current.paint })
+  const snapshotOf = (current: Draft): Snapshot => ({ pages: current.pages, page: pageIndex(current), paint: current.paint })
 
   const remember = useCallback((before: Snapshot, key = "") => {
     const now = Date.now()
@@ -336,7 +419,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
 
   const changeContent = useCallback((next: (content: DocumentContent) => DocumentContent, history: boolean | string = true, id = "") => {
     if (history && draft) remember(snapshotOf(draft), typeof history === "string" ? `${history}:${id}` : "")
-    setDraft((current) => current && { ...current, content: next(current.content) })
+    setDraft((current) => current && withContent(current, next))
   }, [draft, remember])
 
   const changeZone = useCallback((id: string, next: (zone: DocumentZone) => DocumentZone, history: boolean | string) => {
@@ -352,17 +435,21 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
     changeContent((content) => ({ ...content, shapes: content.shapes.map((shape) => shape.id === id ? next(shape) : shape) }), history, id)
   }, [changeContent])
 
-  /** Un état repris d'ailleurs (annuler, refaire) : le texte des zones changées est reposé dans la page. */
+  /**
+   * Un état repris d'ailleurs (annuler, refaire) : ses pages, la page qui était ouverte, et le texte
+   * des zones changées reposé dans la page.
+   */
   function applySnapshot(snapshot: Snapshot) {
     if (!draft) return
-    const before = new Map(draft.content.zones.map((zone) => [zone.id, JSON.stringify(zone.paragraphs)]))
+    const before = new Map(draft.pages.flatMap((candidate) => candidate.content.zones.map((zone) => [zone.id, JSON.stringify(zone.paragraphs)] as const)))
     setContentKeys((keys) => {
       const updated = { ...keys }
-      for (const zone of snapshot.content.zones) if (before.get(zone.id) !== JSON.stringify(zone.paragraphs)) updated[zone.id] = (updated[zone.id] ?? 0) + 1
+      for (const zone of snapshot.pages.flatMap((candidate) => candidate.content.zones)) if (before.get(zone.id) !== JSON.stringify(zone.paragraphs)) updated[zone.id] = (updated[zone.id] ?? 0) + 1
       return updated
     })
-    setDraft((current) => current && { ...current, content: snapshot.content, paint: snapshot.paint })
-    if (selectedId && !snapshot.content.order.includes(selectedId)) setSelectedId(null)
+    setDraft((current) => current && { ...current, pages: snapshot.pages, page: snapshot.page, paint: snapshot.paint })
+    const shown = snapshot.pages[Math.min(snapshot.page, snapshot.pages.length - 1)]
+    if (selectedId && !shown?.content.order.includes(selectedId)) setSelectedId(null)
   }
 
   function undo() {
@@ -380,18 +467,26 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
     applySnapshot(next)
   }
 
+  // Le texte d'une zone arrive parfois juste après avoir quitté sa page (en la quittant) : il va à sa page.
   const zoneText = useCallback((id: string, paragraphs: DocumentParagraph[]) => {
-    setDraft((current) => current && { ...current, content: { ...current.content, zones: current.content.zones.map((zone) => zone.id === id ? { ...zone, paragraphs } : zone) } })
+    setDraft((current) => {
+      if (!current) return current
+      const has = (candidate: DraftPage) => candidate.content.zones.some((zone) => zone.id === id)
+      const target = has(openPage(current)) ? pageIndex(current) : current.pages.findIndex(has)
+      if (target < 0) return current
+      const changed = withContent({ ...current, page: target }, (content) => ({ ...content, zones: content.zones.map((zone) => zone.id === id ? { ...zone, paragraphs } : zone) }))
+      return { ...changed, page: current.page }
+    })
   }, [])
 
   const editing = useCallback((id: string | null) => {
     if (id && draft) {
-      const zone = draft.content.zones.find((candidate) => candidate.id === id)
+      const zone = openPage(draft).content.zones.find((candidate) => candidate.id === id)
       focusSnapshot.current = { id, snapshot: snapshotOf(draft), text: JSON.stringify(zone?.paragraphs ?? []) }
     } else if (!id && focusSnapshot.current && draft) {
       // Le texte écrit d'une traite compte pour un seul retour en arrière.
       const before = focusSnapshot.current
-      const zone = draft.content.zones.find((candidate) => candidate.id === before.id)
+      const zone = draft.pages.flatMap((candidate) => candidate.content.zones).find((candidate) => candidate.id === before.id)
       if (zone && JSON.stringify(zone.paragraphs) !== before.text) {
         lastHistory.current = { key: "", at: 0 }
         setHistory((current) => ({ past: [...current.past.slice(-59), before.snapshot], future: [] }))
@@ -403,10 +498,13 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
 
   const overflow = useCallback((id: string, value: boolean) => setOverflowing((current) => current[id] === value ? current : { ...current, [id]: value }), [])
 
-  const backgroundSize = useCallback((width: number, height: number) => {
-    if (!(width > 0 && height > 0)) return
-    const next = Math.min(DOCUMENT_WIDTH * 4, Math.max(DOCUMENT_WIDTH * 0.2, Math.round((DOCUMENT_WIDTH * height / width) * 10) / 10))
-    setDraft((current) => current && Math.abs(current.content.height - next) > 0.5 ? { ...current, content: { ...current.content, height: next } } : current)
+  /** La hauteur d'une page suit les proportions de son fond, une fois l'image lue. */
+  const backgroundSize = useCallback((pageId: string, width: number, height: number) => {
+    const next = heightOf(width, height)
+    if (!next) return
+    setDraft((current) => current && current.pages.some((candidate) => candidate.id === pageId && Math.abs(candidate.content.height - next) > 0.5)
+      ? { ...current, pages: current.pages.map((candidate) => candidate.id === pageId ? { ...candidate, content: { ...candidate.content, height: next } } : candidate) }
+      : current)
   }, [])
 
   /** L'image d'une pièce : son aperçu local, sinon celle qu'Eraser a rangée avec le document. */
@@ -447,7 +545,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
     const model = selectedZone ?? zones.at(-1)
     const zone = newDocumentZone({
       ...(model ? { font: model.font, size: model.size, color: model.color, lineHeight: model.lineHeight, opacity: model.opacity, ink: model.ink, align: model.align, ...(model.blend ? { blend: model.blend } : {}) } : {}),
-      ...(rect ?? { x: DOCUMENT_WIDTH / 2 - 250, y: draft.content.height / 2 - 70, width: 500, height: 140 }),
+      ...(rect ?? { x: DOCUMENT_WIDTH / 2 - 250, y: openPage(draft).content.height / 2 - 70, width: 500, height: 140 }),
       paragraphs: rect ? [] : [[{ text: "Nouveau texte" }]],
     })
     changeContent((content) => withElementOnTop(content, { kind: "zone", id: zone.id, zone }))
@@ -484,12 +582,13 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
     try {
       const size = await imageSize(preview)
       // Posée au milieu, au plus la moitié du document.
-      const fit = Math.min(1, (DOCUMENT_WIDTH * 0.5) / size.width, (draft.content.height * 0.5) / size.height)
+      const height0 = openPage(draft).content.height
+      const fit = Math.min(1, (DOCUMENT_WIDTH * 0.5) / size.width, (height0 * 0.5) / size.height)
       const width = Math.max(20, size.width * fit), height = Math.max(20, size.height * fit)
       const asset = crypto.randomUUID()
-      const picture: DocumentPicture = { id: crypto.randomUUID(), kind: "image", asset, x: (DOCUMENT_WIDTH - width) / 2, y: (draft.content.height - height) / 2, width, height, rotation: 0, opacity: 1, blend: "normal" }
+      const picture: DocumentPicture = { id: crypto.randomUUID(), kind: "image", asset, x: (DOCUMENT_WIDTH - width) / 2, y: (height0 - height) / 2, width, height, rotation: 0, opacity: 1, blend: "normal" }
       remember(snapshotOf(draft))
-      setDraft((current) => current && { ...current, content: withElementOnTop(current.content, { kind: "picture", id: picture.id, picture }), uploads: { ...current.uploads, [asset]: file }, previews: { ...current.previews, [asset]: preview } })
+      setDraft((current) => current && { ...withContent(current, (content) => withElementOnTop(content, { kind: "picture", id: picture.id, picture })), uploads: { ...current.uploads, [asset]: file }, previews: { ...current.previews, [asset]: preview } })
       setTool("select")
       setSelectedId(picture.id)
     } catch {
@@ -504,7 +603,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
     remember(snapshotOf(draft))
     if (target === null) {
       const picture: DocumentPicture = { id: crypto.randomUUID(), kind: "drawing", asset: crypto.randomUUID(), ...geometry, opacity: 1, blend: "normal" }
-      setDraft((current) => current && { ...current, content: withElementOnTop(current.content, { kind: "picture", id: picture.id, picture }), paint: { ...current.paint, [picture.id]: { width: pixels.width, height: pixels.height, strokes: [done] } } })
+      setDraft((current) => current && { ...withContent(current, (content) => withElementOnTop(content, { kind: "picture", id: picture.id, picture })), paint: { ...current.paint, [picture.id]: { width: pixels.width, height: pixels.height, strokes: [done] } } })
       setSelectedId(picture.id)
       return
     }
@@ -538,8 +637,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
       const layer = draft.paint[selectedPicture.id]
       remember(snapshotOf(draft))
       setDraft((current) => current && {
-        ...current,
-        content: withElementOnTop(current.content, { kind: "picture", id: picture.id, picture }),
+        ...withContent(current, (content) => withElementOnTop(content, { kind: "picture", id: picture.id, picture })),
         previews: asset !== selectedPicture.asset && base ? { ...current.previews, [asset]: base } : current.previews,
         uploads: asset !== selectedPicture.asset && current.uploads[selectedPicture.asset] ? { ...current.uploads, [asset]: current.uploads[selectedPicture.asset] } : current.uploads,
         paint: layer ? { ...current.paint, [picture.id]: { ...layer, strokes: [...layer.strokes] } } : current.paint,
@@ -607,6 +705,8 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
       if (mod && event.key.toLowerCase() === "s") { event.preventDefault(); void save(); return }
       if (target?.isContentEditable && event.key === "Escape") { target.blur(); return }
       if (typing || !draft) return
+      // Page précédente, page suivante.
+      if (pagesOn && !mod && (event.key === "PageUp" || event.key === "PageDown")) { event.preventDefault(); goToPage(pageIndex(draft) + (event.key === "PageDown" ? 1 : -1)); return }
       // Échap ferme d'abord un menu ouvert (couleurs, réglages…), sans rien désélectionner.
       if (event.key === "Escape" && document.querySelector("[data-radix-popper-content-wrapper], [role='dialog'], [role='alertdialog']")) return
       if (mod && event.key.toLowerCase() === "z") { event.preventDefault(); if (event.shiftKey) redo(); else undo(); return }
@@ -643,10 +743,11 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
     else action()
   }
 
+  /** Les aperçus locaux d'un brouillon qu'on quitte (y compris ceux que l'historique gardait). */
   function releasePreviews(current: Draft | null) {
     if (!current) return
-    if (current.uploadPreview) URL.revokeObjectURL(current.uploadPreview)
-    for (const url of Object.values(current.previews)) if (url.startsWith("blob:")) URL.revokeObjectURL(url)
+    const pages = [current.pages, ...history.past.map((snapshot) => snapshot.pages), ...history.future.map((snapshot) => snapshot.pages)].flat()
+    for (const url of new Set([...pages.map((candidate) => candidate.uploadPreview), ...Object.values(current.previews)])) if (url.startsWith("blob:")) URL.revokeObjectURL(url)
   }
 
   function resetEditing() {
@@ -667,10 +768,9 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   const startingSession = initialSessionId && sessions.some((session) => session.id === initialSessionId) ? initialSessionId : ""
 
   function create(background: DocumentBackground, file?: File) {
-    const content = background.kind === "builtin" ? documentFromBuiltin(background.key) : documentOnOwnBackground()
     const next: Draft = {
       id: crypto.randomUUID(), isNew: true, title: "Nouveau document", sessionId: startingSession, folder: "", template: false,
-      background, content, uploadFile: file ?? null, uploadPreview: file ? URL.createObjectURL(file) : "", uploads: {}, previews: {}, remote: [], paint: {},
+      pages: [newDraftPage(background, file)], page: 0, savedFonds: {}, uploads: {}, previews: {}, remote: [], paint: {},
       renderVersion: "", updatedAt: "",
     }
     releasePreviews(draft)
@@ -681,8 +781,8 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   }
 
   /**
-   * Un nouveau document copié d'un autre (dupliquer) ou d'un modèle : son contenu, et ses images
-   * (fond importé, images posées, calques de dessin) relues chez Eraser pour être renvoyées avec
+   * Un nouveau document copié d'un autre (dupliquer) ou d'un modèle : ses pages, et leurs images
+   * (fonds importés, images posées, calques de dessin) relues chez Eraser pour être renvoyées avec
    * la copie. La copie attend d'être enregistrée.
    */
   async function copyOf(source: CampaignDocumentRecord, title: string, folder: string) {
@@ -695,24 +795,29 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
       return response.blob()
     }
     try {
-      const content = normalizeContent(structuredClone(source.content))
+      const sourcePages = draftPagesOf(structuredClone({ background: source.background, content: source.content, pages: pagesOn ? source.pages ?? [] : [] }))
       const uploads: Record<string, Blob> = {}
       const previews: Record<string, string> = {}
-      for (const asset of assetsOf(content)) {
+      for (const asset of assetsOfPages(sourcePages)) {
         const blob = await blobOf(pieceUrl(source.campaignId, source.id, asset, source.updatedAt))
         uploads[asset] = blob
         previews[asset] = URL.createObjectURL(blob)
         made.push(previews[asset])
       }
-      let uploadFile: File | null = null
-      if (source.background.kind === "upload") {
-        const blob = await blobOf(`/api/campaigns/${encodeURIComponent(source.campaignId)}/documents/${encodeURIComponent(source.id)}/image?part=fond&v=${encodeURIComponent(source.updatedAt.replace(/[^0-9A-Za-z]/g, ""))}`)
-        uploadFile = new File([blob], "fond", { type: blob.type || "image/webp" })
+      // Les fonds importés de la source, page par page (la première : « fond »).
+      const pages: DraftPage[] = []
+      for (const [index, sourcePage] of sourcePages.entries()) {
+        if (sourcePage.background.kind !== "upload") { pages.push(sourcePage); continue }
+        const blob = await blobOf(fondUrl(source.campaignId, source.id, fondPart(index, sourcePage.id), source.updatedAt))
+        const uploadFile = new File([blob], "fond", { type: blob.type || "image/webp" })
+        const uploadPreview = URL.createObjectURL(uploadFile)
+        made.push(uploadPreview)
+        pages.push({ ...sourcePage, uploadFile, uploadPreview })
       }
-      // Les éléments gardent leurs noms, mais le document en a un neuf.
+      // Les éléments et les pages gardent leurs noms, mais le document en a un neuf.
       const next: Draft = {
         id: crypto.randomUUID(), isNew: true, title: title.slice(0, 160), sessionId: startingSession, folder, template: false,
-        background: source.background, content, uploadFile, uploadPreview: uploadFile ? URL.createObjectURL(uploadFile) : "", uploads, previews, remote: [], paint: {},
+        pages, page: 0, savedFonds: {}, uploads, previews, remote: [], paint: {},
         renderVersion: "", updatedAt: "",
       }
       releasePreviews(draft)
@@ -739,28 +844,130 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
     guard(() => { void copyOf(template, template.title, "") })
   }
 
+  /** Le fond de la page ouverte : les autres pages gardent le leur (annuler y revient). */
   function changeBackground(background: DocumentBackground, file?: File) {
     if (!draft) return
-    if (draft.uploadPreview) URL.revokeObjectURL(draft.uploadPreview)
-    setDraft({ ...draft, background, uploadFile: file ?? null, uploadPreview: file ? URL.createObjectURL(file) : "" })
+    remember(snapshotOf(draft))
+    setDraft(withPage(draft, (current) => ({ ...current, background, uploadFile: file ?? null, uploadPreview: file ? URL.createObjectURL(file) : "" })))
     setChangingBackground(false)
+  }
+
+  /* ----- pages ----- */
+
+  /** Le fond importé d'une page en fichier : celui qui attend d'être envoyé, sinon celui qu'Eraser range. */
+  async function uploadedBackground(current: Draft, target: DraftPage) {
+    if (target.uploadFile) return target.uploadFile
+    const part = current.savedFonds[target.id]
+    if (!part || current.isNew) return null
+    const response = await fetch(fondUrl(campaignId, current.id, part, current.updatedAt)).catch(() => null)
+    return response?.ok ? response.blob() : null
+  }
+
+  /** Ouvre une autre page (la sélection et l'écriture en cours restent sur la page quittée). */
+  function goToPage(index: number) {
+    if (!draft) return
+    const next = Math.min(draft.pages.length - 1, Math.max(0, index))
+    if (next === pageIndex(draft)) return
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    setSelectedId(null)
+    setDraft((current) => current && { ...current, page: next })
+  }
+
+  /** Une page de plus, juste après la page ouverte, aussitôt ouverte. `patch` : ce qui vient avec elle (dessins, aperçus). */
+  function insertPage(current: Draft, added: DraftPage, patch: Partial<Pick<Draft, "paint" | "previews" | "uploads">> = {}) {
+    const at = pageIndex(current) + 1
+    remember(snapshotOf(current))
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    setSelectedId(null)
+    setDraft((latest) => latest && { ...latest, ...patch, pages: [...latest.pages.slice(0, at), added, ...latest.pages.slice(at)], page: at })
+    setAddingPage(false)
+  }
+
+  /**
+   * Une page sur le même fond que la page ouverte : ses zones de texte à la même place et dans le
+   * même style, vides, prêtes pour la suite. Un fond importé est repris tel quel.
+   */
+  async function addPageOnSameBackground() {
+    if (!draft || draft.pages.length >= MAX_PAGES) return
+    const current = openPage(draft)
+    const file = current.background.kind === "upload" ? await uploadedBackground(draft, current) : null
+    if (current.background.kind === "upload" && !file) { setMessage({ tone: "error", text: "Le fond de cette page n’a pas pu être relu : choisis-le de nouveau pour la nouvelle page." }); return }
+    insertPage(draft, { id: crypto.randomUUID(), background: current.background, content: continuedContent(current.content), uploadFile: file, uploadPreview: file ? URL.createObjectURL(file) : "" })
+  }
+
+  /** Une page sur un autre fond : les zones prêtes à remplir d'un fond fourni, ou une zone. */
+  function addPageOn(background: DocumentBackground, file?: File) {
+    if (!draft || draft.pages.length >= MAX_PAGES) return
+    insertPage(draft, newDraftPage(background, file))
+  }
+
+  /** Une copie de la page ouverte (fond, texte, lignes, formes, images et dessins), juste après elle. */
+  async function duplicatePage() {
+    if (!draft || draft.pages.length >= MAX_PAGES) return
+    const current = openPage(draft)
+    const file = current.background.kind === "upload" ? await uploadedBackground(draft, current) : null
+    if (current.background.kind === "upload" && !file) { setMessage({ tone: "error", text: "Le fond de cette page n’a pas pu être relu : la page n’a pas été dupliquée." }); return }
+    const copy = copiedContent(current.content)
+    // Un calque de dessin copié a son propre fichier : il part de l'image (et des coups) de l'original.
+    const previews = { ...draft.previews }
+    const uploads = { ...draft.uploads }
+    for (const [from, to] of copy.assets) {
+      const base = pictureSrc(from)
+      if (base) previews[to] = base
+      if (draft.uploads[from]) uploads[to] = draft.uploads[from]
+    }
+    const paint = { ...draft.paint }
+    for (const [from, to] of copy.ids) if (draft.paint[from]) paint[to] = { ...draft.paint[from], strokes: [...draft.paint[from].strokes] }
+    insertPage(draft, { id: crypto.randomUUID(), background: current.background, content: copy.content, uploadFile: file, uploadPreview: file ? URL.createObjectURL(file) : "" }, { paint, previews, uploads })
+  }
+
+  /** Avance (`1`) ou recule (`-1`) la page ouverte d'une place. */
+  function movePage(step: 1 | -1) {
+    if (!draft) return
+    const from = pageIndex(draft)
+    const to = from + step
+    if (to < 0 || to >= draft.pages.length) return
+    remember(snapshotOf(draft))
+    const pages = [...draft.pages]
+    const [moved] = pages.splice(from, 1)
+    pages.splice(to, 0, moved)
+    setDraft({ ...draft, pages, page: to })
+  }
+
+  /** Retire la page ouverte (jamais la dernière qui reste) : Ctrl+Z la remet. */
+  function deletePage() {
+    if (!draft || draft.pages.length < 2) return
+    const at = pageIndex(draft)
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    remember(snapshotOf(draft))
+    setSelectedId(null)
+    setDraft({ ...draft, pages: draft.pages.filter((_, index) => index !== at), page: Math.max(0, at - (at === draft.pages.length - 1 ? 1 : 0)) })
+    setMessage({ tone: "ok", text: `Page ${at + 1} retirée : Ctrl+Z la remet.` })
   }
 
   function restoreBackup() {
     if (!backup) return
     const original = documents.find((document) => document.id === backup.id)
-    const remote = original ? assetsOf(normalizeContent(original.content)) : []
-    // Les images pas encore envoyées n'ont pas pu être gardées : elles ne reviennent pas.
-    const lost = backup.content.pictures.filter((picture) => !remote.includes(picture.asset)).map((picture) => picture.id)
-    let content = backup.content
-    for (const id of lost) content = withoutElement(content, id)
-    const restored: Draft = { ...backup, content, remote, paint: Object.fromEntries(Object.entries(backup.paint).filter(([id]) => !lost.includes(id))), isNew: !original, updatedAt: original?.updatedAt ?? backup.updatedAt }
+    const originalPages = original ? draftPagesOf(original) : []
+    const remote = assetsOfPages(originalPages)
+    const savedFonds = savedFondsOf(originalPages)
+    // Les images et les fonds pas encore envoyés n'ont pas pu être gardés : ils ne reviennent pas.
+    const lost = backup.pages.flatMap((candidate) => candidate.content.pictures).filter((picture) => !remote.includes(picture.asset)).map((picture) => picture.id)
+    let lostBackground = false
+    const pages = backup.pages.map((candidate) => {
+      let content = candidate.content
+      for (const id of lost) content = withoutElement(content, id)
+      const keepsBackground = candidate.background.kind !== "upload" || Boolean(savedFonds[candidate.id])
+      if (!keepsBackground) lostBackground = true
+      return { ...candidate, content, background: keepsBackground ? candidate.background : { kind: "builtin", key: "parchemin" } as DocumentBackground }
+    })
+    const restored: Draft = { ...backup, pages, savedFonds, remote, paint: Object.fromEntries(Object.entries(backup.paint).filter(([id]) => !lost.includes(id))), isNew: !original, updatedAt: original?.updatedAt ?? backup.updatedAt }
     releasePreviews(draft)
     resetEditing()
     setDraft(restored)
     setSavedSignature(original ? signature(draftOf(original)) : "")
     setBackup(null)
-    if (lost.length) setMessage({ tone: "error", text: "Les images ajoutées à ce brouillon n’avaient pas été enregistrées : remets-les." })
+    if (lost.length || lostBackground) setMessage({ tone: "error", text: lostBackground ? "Les images et les fonds importés pour ce brouillon n’avaient pas été enregistrés : remets-les." : "Les images ajoutées à ce brouillon n’avaient pas été enregistrées : remets-les." })
   }
   function dropBackup() {
     try { window.localStorage.removeItem(backupKey(campaignId)) } catch { /* rien à effacer */ }
@@ -812,15 +1019,32 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
 
   /* ----- enregistrer ----- */
 
-  const backgroundSrc = draft ? backgroundSource(draft.background, draft.uploadPreview || documentBackgroundUrl(campaignId, draft)) : ""
+  const backgroundSrc = draft && page ? pageBackgroundSrc(campaignId, draft, page) : ""
 
   async function save() {
     if (!draft || saving) return
-    const snapshot = draft
+    let snapshot = draft
     setSaving("render"); setMessage(null)
     try {
-      const image = backgroundSrc ? await loadImage(backgroundSrc) : null
-      const documentJson = JSON.stringify({ id: snapshot.id, title: snapshot.title, sessionId: snapshot.sessionId, background: snapshot.background, content: snapshot.content, folder: snapshot.folder, template: snapshot.template })
+      // Le fond de chaque page, lu une fois : pour le dessin, et pour la hauteur d'une page jamais ouverte.
+      const images = await Promise.all(snapshot.pages.map(async (candidate) => {
+        const src = pageBackgroundSrc(campaignId, snapshot, candidate)
+        return src ? loadImage(src) : null
+      }))
+      const heights = images.map((image) => image ? heightOf(image.naturalWidth || image.width, image.naturalHeight || image.height) : 0)
+      if (snapshot.pages.some((candidate, index) => heights[index] && Math.abs(heights[index] - candidate.content.height) > 0.5)) {
+        const fixed = new Map(snapshot.pages.flatMap((candidate, index) => heights[index] && Math.abs(heights[index] - candidate.content.height) > 0.5 ? [[candidate.id, heights[index]] as const] : []))
+        const fix = (candidate: DraftPage) => fixed.has(candidate.id) ? { ...candidate, content: { ...candidate.content, height: fixed.get(candidate.id)! } } : candidate
+        snapshot = { ...snapshot, pages: snapshot.pages.map(fix) }
+        setDraft((current) => current && current.id === snapshot.id ? { ...current, pages: current.pages.map(fix) } : current)
+      }
+      const [first, ...rest] = snapshot.pages
+      const documentJson = JSON.stringify({
+        id: snapshot.id, title: snapshot.title, sessionId: snapshot.sessionId, background: first.background, content: first.content,
+        // Les pages suivantes ne partent que vers un Eraser qui les garde.
+        ...(pagesOn ? { pages: rest.map((candidate) => ({ id: candidate.id, background: candidate.background, content: candidate.content })) } : {}),
+        folder: snapshot.folder, template: snapshot.template,
+      })
       // Chaque image tient dans un envoi (Eraser refuse plus de 1 Mo par envoi : document-upload.ts).
       // Un seul envoi quand Eraser l'accepte ; sinon, des envois de 1 Mo au plus.
       const requestLimit = features.includes("envoi-unique") ? LARGE_REQUESTS : SMALL_REQUESTS
@@ -828,11 +1052,24 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
       // Les images importées restent légères (l'éditeur les relit à chaque ouverture).
       const imageBudget = Math.min(budget, 4 * 1024 * 1024)
 
+      // Le fond importé d'une page part s'il est nouveau, ou si la page a changé de place (Eraser
+      // range à part celui de la première page) ; sinon, Eraser l'a déjà.
+      const fonds: Array<{ index: number; pageId: string; file: Blob }> = []
+      for (const [index, candidate] of snapshot.pages.entries()) {
+        if (candidate.background.kind !== "upload") continue
+        if (!candidate.uploadFile && snapshot.savedFonds[candidate.id] === fondPart(index, candidate.id)) continue
+        const file = await uploadedBackground(snapshot, candidate)
+        if (!file) throw new Error(`Le fond importé de la page ${index + 1} n’a pas pu être relu : choisis-le de nouveau (bouton Fond).`)
+        fonds.push({ index, pageId: candidate.id, file })
+      }
+      // Tous les fonds tiennent ensemble dans le premier envoi : Eraser veut celui de chaque page avec elle.
+      const fondBudget = Math.max(64 * 1024, Math.min(imageBudget, Math.floor((budget - 64 * 1024) / Math.max(1, fonds.length))))
+
       // Les calques de dessin touchés (ou pas encore chez Eraser) sont aplatis en une image.
       const uploads = { ...snapshot.uploads }
       const previews = { ...snapshot.previews }
       const flattened: Record<string, number> = {}
-      for (const picture of snapshot.content.pictures) {
+      for (const picture of snapshot.pages.flatMap((candidate) => candidate.content.pictures)) {
         if (picture.kind !== "drawing") continue
         const layer = snapshot.paint[picture.id]
         const touched = Boolean(layer?.strokes.length)
@@ -857,17 +1094,31 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
       }
 
       // Les images des pièces, pour le rendu.
+      const assets = assetsOfPages(snapshot.pages)
       const pictures = new Map<string, HTMLImageElement>()
-      for (const asset of assetsOf(snapshot.content)) {
+      for (const asset of assets) {
         const src = previews[asset] || (snapshot.remote.includes(asset) && !snapshot.isNew ? pieceUrl(campaignId, snapshot.id, asset, snapshot.updatedAt) : "")
         const loaded = src ? await loadImage(src).catch(() => null) : null
         if (loaded) pictures.set(asset, loaded)
       }
-      const render = await fittedBlob(await renderDocumentCanvas(snapshot.content, image, DOCUMENT_RENDER_WIDTH, "", pictures), "image/webp", [0.9, 0.8, 0.7], budget)
-      const print = await fittedBlob(await renderDocumentCanvas(snapshot.content, image, DOCUMENT_RENDER_WIDTH, "#ffffff", pictures), "image/jpeg", [0.9, 0.8, 0.7], budget)
-      const background = snapshot.uploadFile ? await fittedBackground(snapshot.uploadFile, imageBudget) : null
+      // Chaque page dessinée : son rendu (lu par les joueurs et Roll20) et son impression (le PDF).
+      const drawn: DocumentPart[] = []
+      for (const [index, candidate] of snapshot.pages.entries()) {
+        const number = index + 1
+        const render = await fittedBlob(await renderDocumentCanvas(candidate.content, images[index], DOCUMENT_RENDER_WIDTH, "", pictures), "image/webp", [0.9, 0.8, 0.7], budget)
+        const print = await fittedBlob(await renderDocumentCanvas(candidate.content, images[index], DOCUMENT_RENDER_WIDTH, "#ffffff", pictures), "image/jpeg", [0.9, 0.8, 0.7], budget)
+        drawn.push(
+          { field: number > 1 ? `render-${number}` : "render", file: new File([render], render.type === "image/webp" ? `rendu-${number}.webp` : `rendu-${number}.png`, { type: render.type }) },
+          { field: number > 1 ? `print-${number}` : "print", file: new File([print], `impression-${number}.jpg`, { type: "image/jpeg" }) },
+        )
+      }
+      const backgrounds: DocumentPart[] = []
+      for (const fond of fonds) {
+        const file = fond.file instanceof File ? fond.file : new File([fond.file], "fond", { type: fond.file.type || "image/webp" })
+        backgrounds.push({ field: fond.index ? `background-${fond.pageId}` : "background", file: await fittedBackground(file, fondBudget) })
+      }
       const pieces: DocumentPart[] = []
-      for (const asset of assetsOf(snapshot.content)) {
+      for (const asset of assets) {
         // Seules les pièces nouvelles ou redessinées partent ; les autres sont déjà chez Eraser.
         const pending = uploads[asset]
         if (!pending) continue
@@ -875,14 +1126,11 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
         pieces.push({ field: `piece-${asset}`, file: await fittedBackground(file, imageBudget, /^image\/(webp|png|jpeg|gif)$/) })
       }
       setSaving("upload")
-      const parts: DocumentPart[] = [
-        ...(background ? [{ field: "background" as const, file: background }] : []),
-        ...pieces,
-        { field: "render", file: new File([render], render.type === "image/webp" ? "rendu.webp" : "rendu.png", { type: render.type }) },
-        { field: "print", file: new File([print], "impression.jpg", { type: "image/jpeg" }) },
-      ]
+      const parts: DocumentPart[] = [...backgrounds, ...pieces, ...drawn]
+      // Eraser a les pages telles qu'envoyées : il range désormais le fond importé de chacune à sa place.
+      const savedFonds = savedFondsOf(snapshot.pages)
       let stored: CampaignDocumentRecord | null = null
-      let backgroundSent = false
+      const sentFonds = new Set<string>()
       const sent = new Set<string>()
       for (const form of await documentForms(documentJson, parts, requestLimit)) {
         const response = await fetch(`/api/campaigns/${encodeURIComponent(campaignId)}/documents`, { method: "POST", body: form })
@@ -894,14 +1142,19 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
         }
         const saved = payload.document
         stored = saved
-        backgroundSent ||= form.has("background")
-        for (const name of form.keys()) if (name.startsWith("piece-")) sent.add(name.slice(6))
-        const clearUpload = backgroundSent
+        for (const name of form.keys()) {
+          if (name.startsWith("piece-")) sent.add(name.slice(6))
+          else if (name === "background") sentFonds.add(first.id)
+          else if (name.startsWith("background-")) sentFonds.add(name.slice(11))
+        }
         const arrived = [...sent]
+        const fondsArrived = new Set(sentFonds)
         // Chaque envoi réussi est gardé : si le suivant échoue, le document existe déjà (et ses images aussi).
         setDocuments((current) => current.some((document) => document.id === saved.id) ? current.map((document) => document.id === saved.id ? saved : document) : [...current, saved])
         setDraft((current) => current && current.id === saved.id ? {
-          ...current, isNew: false, uploadFile: clearUpload && current.uploadFile === snapshot.uploadFile ? null : current.uploadFile,
+          ...current, isNew: false, savedFonds,
+          // Un fond arrivé chez Eraser n'est plus à envoyer (sauf s'il a changé entre-temps).
+          pages: current.pages.map((candidate) => fondsArrived.has(candidate.id) && candidate.uploadFile && candidate.uploadFile === snapshot.pages.find((one) => one.id === candidate.id)?.uploadFile ? { ...candidate, uploadFile: null } : candidate),
           uploads: Object.fromEntries(Object.entries(current.uploads).filter(([asset, blob]) => !arrived.includes(asset) || blob !== uploads[asset])),
           remote: [...new Set([...current.remote, ...arrived])],
           renderVersion: saved.renderVersion, updatedAt: saved.updatedAt,
@@ -910,16 +1163,19 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
       if (!stored) throw new Error("Le document n’a pas pu être enregistré.")
       if (stored.template) setTemplates((current) => [...current.filter((template) => template.id !== stored.id), stored].sort((left, right) => left.title.localeCompare(right.title, "fr")))
       const kept: Draft = {
-        ...snapshot, isNew: false, uploadFile: null, uploads: {}, remote: [...new Set([...snapshot.remote, ...sent])],
+        ...snapshot, isNew: false, savedFonds, uploads: {}, remote: [...new Set([...snapshot.remote, ...sent])],
+        pages: snapshot.pages.map((candidate) => sentFonds.has(candidate.id) ? { ...candidate, uploadFile: null } : candidate),
         paint: Object.fromEntries(Object.entries(snapshot.paint).filter(([id]) => flattened[id] === undefined)),
         renderVersion: stored.renderVersion, updatedAt: stored.updatedAt,
       }
       setSavedSignature(signature(kept))
       try { window.localStorage.removeItem(backupKey(campaignId)) } catch { /* rien à effacer */ }
-      setMessage({ tone: "ok", text: "Document enregistré : prêt à être donné aux joueurs et à partir dans Roll20." })
+      setMessage({ tone: "ok", text: snapshot.pages.length > 1
+        ? `Document enregistré (${snapshot.pages.length} pages) : prêt à être donné et à partir dans Roll20.`
+        : "Document enregistré : prêt à être donné et à partir dans Roll20." })
     } catch (error) {
       const text = error instanceof DOMException && error.name === "SecurityError"
-        ? "Cette image de fond ne peut pas être dessinée (son site la protège). Envoie-la plutôt depuis ton ordinateur."
+        ? "Une image de fond ne peut pas être dessinée (son site la protège). Envoie-la plutôt depuis ton ordinateur."
         : error instanceof Error ? error.message : "Le document n’a pas pu être enregistré."
       setMessage({ tone: "error", text })
     } finally {
@@ -991,7 +1247,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
         <div>
           <FileText className="mx-auto size-9 text-primary/40" />
           <p className="mt-3 font-display text-2xl font-semibold">{documents.length ? "Choisis un document" : "Aucun document"}</p>
-          <p className="mt-1 text-sm text-muted-foreground">Une lettre, un parchemin, une page de grimoire : écris-le sur un fond, puis donne-le à un joueur ou envoie-le dans Roll20.</p>
+          <p className="mt-1 text-sm text-muted-foreground">Une lettre, un parchemin, une page de grimoire : écris-le sur un fond (sur une ou plusieurs pages), puis donne-le à un joueur, à un marchand ou à un PNJ, ou envoie-le dans Roll20.</p>
           <Button type="button" className="mt-5" onClick={() => setChoosing(true)}><Plus />Écrire un document</Button>
         </div>
       </div> : <>
@@ -1016,11 +1272,11 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
             <ToolButton label={showFrames ? "Cacher les cadres des zones" : "Montrer les cadres des zones"} active={showFrames} onClick={() => setShowFrames((current) => !current)}><Frame className="size-4" /></ToolButton>
           </span>
           <Popover open={changingBackground} onOpenChange={setChangingBackground}>
-            <PopoverTrigger asChild><Button type="button" variant="outline"><FileImage />Fond</Button></PopoverTrigger>
+            <PopoverTrigger asChild><Button type="button" variant="outline" title={pageCount > 1 ? `Le fond de la page ${pageIndex(draft) + 1}` : "Le fond du document"}><FileImage />Fond</Button></PopoverTrigger>
             <PopoverContent align="end" className="w-[26rem] max-w-[calc(100vw-2rem)]">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-[.16em] text-muted-foreground">Changer le fond</p>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[.16em] text-muted-foreground">{pageCount > 1 ? `Changer le fond de la page ${pageIndex(draft) + 1}` : "Changer le fond"}</p>
               <BackgroundChoices compact onBuiltin={(key) => changeBackground({ kind: "builtin", key })} onFile={(file) => changeBackground({ kind: "upload" }, file)} onUrl={(url) => changeBackground({ kind: "url", url })} />
-              <p className={cn(hintText, "mt-2")}>Le texte, les lignes, les images et les dessins restent à leur place.</p>
+              <p className={cn(hintText, "mt-2")}>{pageCount > 1 ? "Le texte, les lignes, les images et les dessins restent à leur place ; les autres pages gardent leur fond." : "Le texte, les lignes, les images et les dessins restent à leur place."}</p>
             </PopoverContent>
           </Popover>
           <Button type="button" onClick={() => void save()} disabled={Boolean(saving) || (!dirty && Boolean(draft.renderVersion))} title="Ctrl+S">
@@ -1045,7 +1301,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
           {layersOn && <>
             <Button type="button" size="sm" variant="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => imageInput.current?.click()} title="Poser une image de l’ordinateur sur le document"><ImagePlus />Image</Button>
             <input ref={imageInput} type="file" accept="image/*" className="sr-only" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void addImage(file) }} />
-            <LayersPopover content={draft.content} selectedId={selectedId} onSelect={(id) => { setTool("select"); setSelectedId(id) }} onMove={moveLayer} />
+            <LayersPopover content={page!.content} selectedId={selectedId} onSelect={(id) => { setTool("select"); setSelectedId(id) }} onMove={moveLayer} />
           </>}
           <Separator />
 
@@ -1193,11 +1449,50 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
         {message && <p className={cn("rounded-xl border px-4 py-2.5 text-sm", message.tone === "ok" ? "border-emerald-600/25 bg-emerald-600/8 text-emerald-800 dark:text-emerald-300" : "border-destructive/25 bg-destructive/5 text-destructive")}>{message.text}</p>}
         {anyOverflow && <p className="flex items-center gap-2 text-xs text-amber-700 dark:text-amber-400"><TriangleAlert className="size-3.5" />Le texte dépasse de sa zone : agrandis-la ou réduis la taille du texte.</p>}
 
-        {/* Le document */}
+        {/* Les pages : passer de l'une à l'autre, en ajouter, les ranger */}
+        {pagesOn && page && <div className="flex flex-wrap items-center gap-1 rounded-2xl border bg-card/60 p-1.5" role="toolbar" aria-label="Les pages du document">
+          <ToolButton label="Page précédente (Page ↑)" disabled={pageIndex(draft) === 0} onClick={() => goToPage(pageIndex(draft) - 1)}><ChevronLeft className="size-4" /></ToolButton>
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto px-0.5 py-1">
+            {draft.pages.map((candidate, index) => {
+              const active = index === pageIndex(draft)
+              return <button key={candidate.id} type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => goToPage(index)} aria-current={active ? "page" : undefined} title={`Page ${index + 1}`} aria-label={`Page ${index + 1}`} className={cn("relative h-14 w-11 shrink-0 overflow-hidden rounded-md border bg-muted/40 transition", active ? "border-primary ring-2 ring-primary/35" : "opacity-80 hover:border-primary/50 hover:opacity-100")}>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={pageBackgroundSrc(campaignId, draft, candidate)} alt="" loading="lazy" draggable={false} className="size-full object-cover" />
+                <span className={cn("absolute bottom-0.5 right-0.5 min-w-4 rounded px-1 text-center text-[10px] font-semibold tabular-nums", active ? "bg-primary text-primary-foreground" : "bg-background/85")}>{index + 1}</span>
+              </button>
+            })}
+            <Popover open={addingPage} onOpenChange={setAddingPage}>
+              <PopoverTrigger asChild>
+                <button type="button" disabled={pageCount >= MAX_PAGES} onMouseDown={(event) => event.preventDefault()} title={pageCount >= MAX_PAGES ? `${MAX_PAGES} pages au plus` : "Ajouter une page"} aria-label="Ajouter une page" className="flex h-14 w-11 shrink-0 items-center justify-center rounded-md border border-dashed text-muted-foreground transition hover:border-primary/50 hover:bg-primary/5 hover:text-primary disabled:opacity-40"><FilePlus2 className="size-4" /></button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="grid w-[26rem] max-w-[calc(100vw-2rem)] gap-3">
+                <p className="text-xs font-semibold uppercase tracking-[.16em] text-muted-foreground">Une page après la page {pageIndex(draft) + 1}</p>
+                <button type="button" onClick={() => void addPageOnSameBackground()} className="flex items-center gap-3 rounded-xl border bg-card/60 p-2 text-left transition hover:border-primary/50 hover:bg-primary/5">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={backgroundSrc} alt="" className="size-12 shrink-0 rounded-md object-cover" />
+                  <span className="min-w-0"><span className="block text-sm font-medium">Le même fond</span><span className={hintText}>La suite de la page : ses zones de texte, vides, au même endroit.</span></span>
+                </button>
+                <p className="text-xs font-semibold uppercase tracking-[.16em] text-muted-foreground">Ou un autre fond</p>
+                <BackgroundChoices compact onBuiltin={(key) => addPageOn({ kind: "builtin", key })} onFile={(file) => addPageOn({ kind: "upload" }, file)} onUrl={(url) => addPageOn({ kind: "url", url })} />
+              </PopoverContent>
+            </Popover>
+          </div>
+          <ToolButton label="Page suivante (Page ↓)" disabled={pageIndex(draft) >= pageCount - 1} onClick={() => goToPage(pageIndex(draft) + 1)}><ChevronRight className="size-4" /></ToolButton>
+          <Separator />
+          <span className="px-1 text-xs tabular-nums text-muted-foreground">Page {pageIndex(draft) + 1} / {pageCount}</span>
+          <ToolButton label="Placer cette page avant la précédente" disabled={pageIndex(draft) === 0} onClick={() => movePage(-1)}><MoveLeft className="size-4" /></ToolButton>
+          <ToolButton label="Placer cette page après la suivante" disabled={pageIndex(draft) >= pageCount - 1} onClick={() => movePage(1)}><MoveRight className="size-4" /></ToolButton>
+          <ToolButton label="Dupliquer cette page (fond, texte, dessins)" disabled={pageCount >= MAX_PAGES} onClick={() => void duplicatePage()}><CopyPlus className="size-4" /></ToolButton>
+          <ToolButton label={pageCount < 2 ? "Un document garde au moins une page" : "Retirer cette page (Ctrl+Z la remet)"} disabled={pageCount < 2} onClick={deletePage}><Trash2 className="size-4 text-destructive/80" /></ToolButton>
+        </div>}
+
+        {/* Le document : la page ouverte */}
         <div className="rounded-2xl border bg-[repeating-conic-gradient(rgb(0_0_0/0.035)_0_25%,transparent_0_50%)] bg-[length:22px_22px] p-3 sm:p-5">
-          <div className="mx-auto w-full max-w-[min(100%,calc(78vh*var(--document-ratio)))]" style={{ ["--document-ratio" as string]: String(DOCUMENT_WIDTH / draft.content.height) }}>
+          <div className="mx-auto w-full max-w-[min(100%,calc(78vh*var(--document-ratio)))]" style={{ ["--document-ratio" as string]: String(DOCUMENT_WIDTH / page!.content.height) }}>
             <DocumentStage
-              content={draft.content}
+              // Une autre page : une autre scène (le texte des zones y est posé à neuf).
+              key={page!.id}
+              content={page!.content}
               backgroundSrc={backgroundSrc}
               selectedId={selectedId}
               contentKeys={contentKeys}
@@ -1222,7 +1517,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
               onStroke={stroke}
               onEditing={editing}
               onOverflow={overflow}
-              onBackgroundSize={backgroundSize}
+              onBackgroundSize={(width, height) => backgroundSize(page!.id, width, height)}
             />
           </div>
         </div>
@@ -1231,8 +1526,8 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
         {/* Ce qu'on fait du document */}
         <div className="flex flex-wrap items-center gap-2 rounded-2xl border bg-card/60 p-2.5">
           <span className={cn(fieldLabel, "mr-auto")}>{draft.isNew ? "Pas encore enregistré" : saved?.updatedAt ? `Enregistré le ${new Date(saved.updatedAt).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" })}` : ""}{dirty && !draft.isNew ? " · modifications non enregistrées" : ""}</span>
-          <Button type="button" variant="outline" size="sm" disabled={!draft.renderVersion} title={draft.renderVersion ? "Voir le document comme le joueur le lira" : "Enregistre d’abord le document"} onClick={() => setViewing({ campaignId, documentId: draft.id, title: draft.title, version: draft.renderVersion })}><Eye />Aperçu</Button>
-          <GiveDocumentButton campaignId={campaignId} documentId={draft.id} title={draft.title} players={players} disabledReason={!draft.renderVersion ? "Enregistre d’abord le document" : dirty ? "Enregistre d’abord tes modifications" : ""} onGiven={(text) => setMessage({ tone: "ok", text })} />
+          <Button type="button" variant="outline" size="sm" disabled={!draft.renderVersion} title={draft.renderVersion ? "Voir le document comme le joueur le lira" : "Enregistre d’abord le document"} onClick={() => setViewing({ campaignId, documentId: draft.id, title: draft.title, version: draft.renderVersion, pages: 1 + (saved?.pages?.length ?? 0) })}><Eye />Aperçu</Button>
+          <GiveDocumentButton campaignId={campaignId} documentId={draft.id} title={draft.title} players={players} merchants={merchants} npcs={npcs} disabledReason={!draft.renderVersion ? "Enregistre d’abord le document" : dirty ? "Enregistre d’abord tes modifications" : ""} onGiven={(text) => setMessage({ tone: "ok", text })} />
           <Button type="button" variant="outline" size="sm" disabled={draft.isNew || dirty || copying} title={draft.isNew ? "Enregistre d’abord le document" : dirty ? "Enregistre d’abord tes modifications" : "Une copie de ce document, à modifier"} onClick={duplicateDocument}>{copying ? <LoaderCircle className="animate-spin" /> : <CopyPlus />}Dupliquer</Button>
           {templatesOn && <Button type="button" variant={draft.template ? "secondary" : "ghost"} size="sm" aria-pressed={draft.template} title={draft.template ? "C’est un modèle : il est proposé dans « Nouveau document », dans toutes tes campagnes. Clique pour le retirer des modèles." : "En faire un modèle : il sera proposé dans « Nouveau document », dans toutes tes campagnes"} onClick={() => void place(draft, { template: !draft.template })}><LayoutTemplate />{draft.template ? "Modèle" : "En faire un modèle"}</Button>}
           <Button type="button" variant="ghost" size="sm" className="text-destructive" onClick={() => setDeleting(true)}><Trash2 />Supprimer</Button>
@@ -1305,8 +1600,16 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   </div>
 }
 
-/** Le fond envoyé depuis l'ordinateur et déjà enregistré (versionné par la date du document). */
-function documentBackgroundUrl(campaignId: string, draft: Pick<Draft, "id" | "updatedAt" | "isNew">) {
-  if (draft.isNew) return ""
-  return `/api/campaigns/${encodeURIComponent(campaignId)}/documents/${encodeURIComponent(draft.id)}/image?part=fond&v=${encodeURIComponent(draft.updatedAt.replace(/[^0-9A-Za-z]/g, ""))}`
+/**
+ * Le fond importé d'une page tel qu'Eraser le range (`fond` pour la première page, `fond-<id>` pour
+ * une autre), versionné par la date du document.
+ */
+function fondUrl(campaignId: string, documentId: string, part: string, version: string) {
+  return `/api/campaigns/${encodeURIComponent(campaignId)}/documents/${encodeURIComponent(documentId)}/image?part=${encodeURIComponent(part)}&v=${encodeURIComponent(version.replace(/[^0-9A-Za-z]/g, ""))}`
+}
+
+/** Le fond d'une page à afficher et à dessiner : son aperçu local, sinon celui qu'Eraser range. */
+function pageBackgroundSrc(campaignId: string, draft: Pick<Draft, "id" | "isNew" | "updatedAt" | "savedFonds">, page: DraftPage) {
+  const stored = !draft.isNew && draft.savedFonds[page.id] ? fondUrl(campaignId, draft.id, draft.savedFonds[page.id], draft.updatedAt) : ""
+  return backgroundSource(page.background, page.uploadPreview || stored)
 }

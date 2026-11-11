@@ -1,9 +1,22 @@
-# Eraser Doc 0.2.1 — Enregistrer plus vite
+# Eraser Doc 0.3.0 — Plusieurs pages, et des documents pour les marchands et les PNJ
 
-- **Un document s'enregistre bien plus vite** avec Eraser 0.1.1-alpha.286 : il part en un seul
-  envoi (une seule lecture et une seule écriture dans Google Sheets, au lieu de deux), et ses
-  images partent ensemble vers Google Drive.
-- Le rendu donné aux joueurs et l'impression du PDF gardent toujours leur pleine qualité : ils
-  n'ont plus besoin d'être allégés pour tenir dans 1 Mo.
-- Avec un Eraser plus ancien, rien ne change : le document part en plusieurs envois, comme en
-  0.2.0.
+Avec Eraser 0.1.1-alpha.288 ou plus récent :
+
+- **Un document de plusieurs pages.** Une barre des pages, sous les outils, montre chaque page en
+  vignette : un clic l'ouvre, les flèches (ou Page ↑ / Page ↓) passent à la précédente ou à la
+  suivante. « + » ajoute une page juste après celle qui est ouverte, **sur le même fond** (ses
+  zones de texte reviennent vides, au même endroit et dans le même style : la suite de la page)
+  ou **sur un autre fond** (fourni, depuis l'ordinateur ou une adresse). Une page se duplique
+  (fond, texte, lignes, formes, images et dessins), se déplace avant ou après sa voisine, et se
+  retire (Ctrl+Z la remet). 30 pages au plus ; le bouton « Fond » change le fond de la page
+  ouverte seulement.
+- **Ça reste un seul document.** « Enregistrer » dessine toutes les pages : les joueurs les lisent
+  page par page avec de petites flèches (et ← →), le PDF les contient toutes, Roll20 reçoit un
+  handout (la première page) et le PDF complet.
+- **« Donner à… » : joueurs, marchands, puis PNJ.** Un marchand (le PNJ d'un magasin sauvegardé)
+  ou un autre PNJ reçoit le document dans son Sac à dos.
+- La liste des documents dit combien de pages a chacun ; dupliquer un document ou partir d'un
+  modèle recopie toutes ses pages.
+
+Avec un Eraser plus ancien, rien ne change : l'éditeur reste à une page, et « Donner à… » ne
+propose que les joueurs.

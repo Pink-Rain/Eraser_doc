@@ -104,6 +104,42 @@ export function movedInOrder(content: DocumentContent, id: string, move: 1 | -1 
   return { ...normalizeContent(content), order }
 }
 
+/* ---------- pages ---------- */
+
+/**
+ * Le contenu d'une page recopié pour une autre (dupliquer une page) : chaque élément a un nouvel
+ * identifiant (l'ordre des calques suit), chaque calque de dessin un nouveau fichier (il sera
+ * dessiné à part), une image posée garde le sien. `ids` et `assets` : les anciens noms et les nouveaux.
+ */
+export function copiedContent(content: DocumentContent) {
+  const normalized = normalizeContent(content)
+  const ids = new Map<string, string>()
+  const assets = new Map<string, string>()
+  const fresh = (id: string) => {
+    const next = crypto.randomUUID()
+    ids.set(id, next)
+    return next
+  }
+  const zones = normalized.zones.map((zone) => ({ ...zone, id: fresh(zone.id), paragraphs: zone.paragraphs.map((paragraph) => paragraph.map((run) => ({ ...run }))) }))
+  const lines = normalized.lines.map((line) => ({ ...line, id: fresh(line.id) }))
+  const shapes = normalized.shapes.map((shape) => ({ ...shape, id: fresh(shape.id) }))
+  const pictures = normalized.pictures.map((picture) => {
+    const asset = picture.kind === "drawing" ? crypto.randomUUID() : picture.asset
+    if (asset !== picture.asset) assets.set(picture.asset, asset)
+    return { ...picture, id: fresh(picture.id), asset }
+  })
+  return { content: { ...normalized, zones, lines, shapes, pictures, order: normalized.order.map((id) => ids.get(id) ?? id) }, ids, assets }
+}
+
+/**
+ * La suite d'une page, sur le même fond : ses zones de texte à la même place et dans le même style
+ * (police, taille, encre, alignement), vides ; ni lignes, ni formes, ni images.
+ */
+export function continuedContent(content: DocumentContent): DocumentContent {
+  const zones = orderedElements(content).flatMap((element) => element.kind === "zone" ? [{ ...element.zone, id: crypto.randomUUID(), paragraphs: [] }] : [])
+  return { version: 1, height: content.height, zones, lines: [], shapes: [], pictures: [], order: zones.map((zone) => zone.id) }
+}
+
 export const elementLabel = (element: DocumentElement) => {
   if (element.kind === "line") return "Ligne"
   if (element.kind === "shape") return shapeKinds.find((kind) => kind.value === element.shape.shape)?.label ?? "Forme"

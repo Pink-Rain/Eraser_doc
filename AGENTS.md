@@ -20,14 +20,24 @@ est décrit dans la section « Extensions » de l'`ARCHITECTURE.md` d'Eraser.
   formes et dégradés, même mode de fusion CSS/canvas, `blendModes`), sinon l'image donnée aux
   joueurs ne ressemble plus à ce que le MJ a fait. Une forme se dessine à part puis se fond d'un
   seul tenant, comme le SVG de la scène.
-- Un document : zones de texte, lignes, formes, images posées et calques de dessin, dans l'ordre
-  de `content.order`. Un calque de dessin garde ses coups de plume en mémoire (annuler trait par
+- Un document : une ou plusieurs pages (30 au plus), chacune avec son fond et ses zones de texte,
+  lignes, formes, images posées et calques de dessin, dans l'ordre de `content.order`. La première
+  page est le `background` et le `content` du document (ce que lit un Eraser sans pages) ; les
+  suivantes sont dans `pages` (`id`, `background`, `content`), envoyé seulement si Eraser annonce
+  `pages`. Le brouillon de l'éditeur tient toutes les pages (`Draft.pages`, `Draft.page` : la
+  page ouverte) ; annuler revient aussi sur les pages. « Enregistrer » dessine chaque page
+  (`render`/`print`, puis `render-<n>`/`print-<n>`) ; le fond importé d'une page part avec elle
+  (`background`, `background-<id>`) quand il est nouveau ou que la page a changé de place, car
+  Eraser range à part celui de la première (`savedFonds` dit où il est). Une page dupliquée
+  renomme ses éléments et ses calques de dessin (`copiedContent`) : deux pages ne partagent
+  jamais un calque. Un calque de dessin garde ses coups de plume en mémoire (annuler trait par
   trait) et part dans Drive comme une image à l'enregistrement (`piece-<nom>`) ; une image posée
   aussi. Dossier et modèle s'enregistrent tout seuls (`PATCH`), sans redessiner.
 - **Seuls les types viennent du modèle d'Eraser pour les nouveautés** : une valeur nouvelle du
   modèle (liste, fonction) n'existe pas dans un Eraser plus ancien, qui prête quand même l'ancien
   module. L'éditeur lit `features` (`?atelier=1`) et ne propose un outil que si Eraser sait le
-  garder (`calques`, `formes`, `dossiers`, `modeles`).
+  garder (`calques`, `formes`, `dossiers`, `modeles`, `pages`). « Donner à… » reçoit de
+  `?atelier=1` les `players`, puis les `merchants` et les `npcs` (absents d'un Eraser plus ancien).
 - **Les envois de fichiers passent par `src/document-upload.ts`** : avant l'alpha 286, le serveur
   d'Eraser (vinext) refusait (413) tout POST `multipart/form-data` de plus de 1 Mo, même vers
   `/api/…` ; les images y sont alors ajustées et réparties en plusieurs envois. Depuis, Eraser
@@ -55,8 +65,9 @@ est décrit dans la section « Extensions » de l'`ARCHITECTURE.md` d'Eraser.
   `assets/` copié dans `dist/`. Il échoue si `src/` importe un module qu'Eraser ne prête pas.
 - `npm run check` : types de `src/` avec ceux d'Eraser.
 - `npm test` : `tests/*.test.mjs` (fonds et polices : chaque clé d'Eraser a ses fichiers ; un
-  document neuf et chaque nouvel élément passent le nettoyage d'Eraser sans rien perdre ; ordre des
-  calques, formes, dégradés ; envois sous 1 Mo), avec les modules d'Eraser comme à l'exécution.
+  document neuf, chaque nouvel élément et des pages faites par l'éditeur passent le nettoyage
+  d'Eraser sans rien perdre ; ordre des calques, formes, dégradés ; pages dupliquées ; envois sous
+  1 Mo, fonds des pages dans le premier envoi), avec les modules d'Eraser comme à l'exécution.
 - `npm run pack` : `release/eraser-extension.json` et `release/eraser-extension.pack.gz`.
 
 ## Publier

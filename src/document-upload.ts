@@ -12,8 +12,9 @@ import { canvasBlob, loadImage } from "./document-render"
  *
  * Chaque image est donc préparée pour tenir sous cette limite (la qualité baisse d'abord, la
  * taille seulement si cela ne suffit pas), puis le document part en autant d'envois qu'il faut :
- * le fond importé d'abord (le serveur le veut avant ou avec le rendu), les images posées et les
- * calques de dessin, puis le rendu et l'impression. Chaque envoi réécrit la même ligne du document ; le dernier fait foi.
+ * les fonds importés d'abord (le serveur veut le fond de chaque page dès le premier envoi qui la
+ * nomme), les images posées et les calques de dessin, puis les rendus et les impressions des pages.
+ * Chaque envoi réécrit la même ligne du document ; le dernier fait foi.
  */
 
 /** La limite d'un Eraser d'avant l'alpha 286 (1 Mo par envoi), moins une marge. */
@@ -25,8 +26,12 @@ const IMAGE_LIMIT = 14 * 1024 * 1024
 /** En dessous, une image n'est plus réduite : elle part telle quelle. */
 const MIN_WIDTH = 480
 
-/** Une image d'un envoi : `background`, `render`, `print`, ou `piece-<nom>` (image posée, calque de dessin). */
-export type DocumentPart = { field: "background" | "render" | "print" | `piece-${string}`; file: File }
+/**
+ * Une image d'un envoi : `background`, `render`, `print` (la première page), `background-<id de la
+ * page>`, `render-<n>`, `print-<n>` (les pages suivantes, n à partir de 2), ou `piece-<nom>` (image
+ * posée, calque de dessin).
+ */
+export type DocumentPart = { field: "background" | `background-${string}` | "render" | `render-${number}` | "print" | `print-${number}` | `piece-${string}`; file: File }
 
 /** Ce qui reste pour une image dans un envoi, une fois le document (JSON) compté. */
 export function partBudget(documentJson: string, limit = SMALL_REQUESTS) {
