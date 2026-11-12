@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   AlignCenter, AlignJustify, AlignLeft, AlignRight, AlignVerticalJustifyCenter, AlignVerticalJustifyEnd, AlignVerticalJustifyStart,
-  ArrowDownToLine, ArrowUpToLine, Bold, Check, ChevronLeft, ChevronRight, Circle, Copy, CopyPlus, Diamond, Eraser, Eye, EyeOff, FileImage, FilePlus2, FileText, Folder, Frame, ImagePlus, Italic,
-  LayoutTemplate, Link2, LoaderCircle, Minus, MousePointer2, MoveLeft, MoveRight, PenTool, Plus, Redo2, RotateCcw, Save, Shapes, Slash, Square, Star, Strikethrough, Trash2,
+  ArrowDownToLine, ArrowUpToLine, Bold, BookMarked, BookOpen, Check, ChevronLeft, ChevronRight, Circle, Copy, CopyPlus, Diamond, Eraser, Eye, EyeOff, FileImage, FilePlus2, FileText, Folder, Frame, ImagePlus, Italic,
+  LayoutTemplate, Link2, LoaderCircle, Minus, MousePointer2, MoveLeft, MoveRight, PenTool, Plus, Redo2, RotateCcw, Save, Shapes, Slash, Sparkles, Square, Star, Strikethrough, Trash2,
   Triangle, TriangleAlert, Type, Underline, Undo2, Upload,
 } from "lucide-react"
 
@@ -18,14 +18,14 @@ import { replaceAppUrl } from "@/components/eraser/app-tabs"
 import {
   DEFAULT_INK, DOCUMENT_RENDER_WIDTH, DOCUMENT_WIDTH, builtinBackgroundKeys, cleanDocumentContent, documentFontKeys,
   documentImageUrl, documentStudioHref,
-  type BuiltinBackgroundKey, type CampaignDocumentRecord, type DocumentAlign, type DocumentBackground, type DocumentContent, type DocumentPage, type DocumentRecipient,
+  type BuiltinBackgroundKey, type CampaignDocumentRecord, type DocumentAlign, type DocumentBackground, type DocumentContent, type DocumentLibraryBackground, type DocumentMetal, type DocumentPage, type DocumentPageRole, type DocumentRecipient, type DocumentRelief,
   type DocumentLine, type DocumentLineStyle, type DocumentParagraph, type DocumentPicture, type DocumentShape, type DocumentShapeFill, type DocumentShapeKind, type DocumentVerticalAlign, type DocumentZone,
 } from "@/lib/document-model"
 import { cn } from "@/lib/utils"
 
-import { builtinBackgrounds, documentFonts, documentFromBuiltin, documentOnOwnBackground, newDocumentZone } from "./document-assets"
+import { COVER_KEYWORD, END_KEYWORD, builtinBackgrounds, documentFonts, documentFromBuiltin, documentOnOwnBackground, keywordKey, libraryBackgroundUrl, newDocumentZone, plainParagraphs } from "./document-assets"
 import {
-  DRAWING_SCALE, continuedContent, copiedContent, flattenDrawing, shapeKinds, movedInOrder, newDocumentLine, newDocumentShape, normalizeContent, pieceUrl, withElementOnTop, withoutElement, zoneBlend,
+  DRAWING_SCALE, continuedContent, copiedContent, defaultRelief, flattenDrawing, metalGradientCss, metals, reliefKinds, shapeKinds, movedInOrder, newDocumentLine, newDocumentShape, normalizeContent, pieceUrl, withElementOnTop, withoutElement, zoneBlend,
   type Paint, type Stroke,
 } from "./document-elements"
 import { DocumentLibrary, folderNames } from "./document-library"
@@ -208,6 +208,18 @@ function fillPreview(shape: ShapeSettings) {
   return shape.fill === "radial" ? `radial-gradient(circle, ${shape.fillColor}, ${end})` : `linear-gradient(${shape.gradientAngle + 90}deg, ${shape.fillColor}, ${end})`
 }
 
+/** D'où vient la lumière d'un relief : les huit directions d'un clic (0° : d'en haut). */
+const lightDirections = [
+  { angle: 315, arrow: "↖", title: "D’en haut à gauche" }, { angle: 0, arrow: "↑", title: "D’en haut" }, { angle: 45, arrow: "↗", title: "D’en haut à droite" },
+  { angle: 270, arrow: "←", title: "De gauche" }, { angle: 90, arrow: "→", title: "De droite" },
+  { angle: 225, arrow: "↙", title: "D’en bas à gauche" }, { angle: 180, arrow: "↓", title: "D’en bas" }, { angle: 135, arrow: "↘", title: "D’en bas à droite" },
+] as const
+
+/** Le nom d'une page dans la barre des pages : « Couverture », « Image de fin », ou son numéro. */
+function pageName(role: DocumentPageRole | undefined, index: number) {
+  return role === "cover" ? "Couverture" : role === "end" ? "Image de fin" : `Page ${index + 1}`
+}
+
 /** La hauteur d'une page dont le fond mesure `width` × `height` (en unités du document). */
 function heightOf(width: number, height: number) {
   if (!(width > 0 && height > 0)) return 0
@@ -266,7 +278,29 @@ function NibPreview({ brush }: { brush: BrushSettings }) {
 
 /* ---------- choix du fond ---------- */
 
-function BackgroundChoices({ onBuiltin, onFile, onUrl, compact = false }: { onBuiltin: (key: BuiltinBackgroundKey) => void; onFile: (file: File) => void; onUrl: (url: string) => void; compact?: boolean }) {
+/** La bibliothèque des fonds lue chez Eraser (`?atelier=1`) : `null` si l'Eraser installé n'en a pas. */
+export type BackgroundLibrary = { backgrounds: DocumentLibraryBackground[]; builtin: Partial<Record<BuiltinBackgroundKey, string[]>> | null }
+
+/** Les mots-clés des fonds fournis tant qu'un administrateur ne les a pas changés (comme Eraser). */
+const defaultBuiltinKeywords: Record<BuiltinBackgroundKey, string[]> = { parchemin: ["Parchemin"], rouleau: ["Rouleau"], livre: ["Livre"] }
+
+type BackgroundChoice = { id: string; label: string; src: string; keywords: string[]; pick: () => void }
+
+/**
+ * Les fonds à choisir : ceux fournis et ceux de la bibliothèque, rangés par mot-clé (un fond à deux
+ * mots-clés est dans les deux sections, un fond sans mot-clé dans « Autres ») ; `prefer` met un
+ * mot-clé en tête (« Couverture » pour une couverture). Sans bibliothèque (Eraser plus ancien), les
+ * fonds fournis, comme avant. Toujours : une image de l'ordinateur ou une adresse.
+ */
+function BackgroundChoices({ onBuiltin, onLibrary, onFile, onUrl, compact = false, library = null, prefer = "" }: {
+  onBuiltin: (key: BuiltinBackgroundKey) => void
+  onLibrary?: (id: string) => void
+  onFile: (file: File) => void
+  onUrl: (url: string) => void
+  compact?: boolean
+  library?: BackgroundLibrary | null
+  prefer?: string
+}) {
   const [url, setUrl] = useState("")
   const [error, setError] = useState("")
   function submitUrl() {
@@ -277,14 +311,39 @@ function BackgroundChoices({ onBuiltin, onFile, onUrl, compact = false }: { onBu
       onUrl(parsed.toString())
     } catch { setError("Colle l’adresse complète d’une image (https://…).") }
   }
+  const choices: BackgroundChoice[] = [
+    ...builtinBackgroundKeys.map((key) => ({ id: `builtin:${key}`, label: builtinBackgrounds[key].label, src: builtinBackgrounds[key].src, keywords: library?.builtin?.[key] ?? defaultBuiltinKeywords[key], pick: () => onBuiltin(key) })),
+    ...(library?.backgrounds ?? []).map((background) => ({ id: `library:${background.id}`, label: background.name, src: libraryBackgroundUrl(background.id), keywords: background.keywords, pick: () => onLibrary?.(background.id) })),
+  ]
+  const groups = new Map<string, { word: string; choices: BackgroundChoice[] }>()
+  for (const choice of choices) for (const word of choice.keywords) {
+    const key = keywordKey(word)
+    if (!key) continue
+    const group = groups.get(key) ?? { word, choices: [] }
+    group.choices.push(choice)
+    groups.set(key, group)
+  }
+  const preferred = prefer ? keywordKey(prefer) : ""
+  const sections = [...groups.entries()]
+    .sort(([leftKey, left], [rightKey, right]) => Number(rightKey === preferred) - Number(leftKey === preferred) || left.word.localeCompare(right.word, "fr"))
+    .map(([, group]) => group)
+  const others = choices.filter((choice) => !choice.keywords.some((word) => keywordKey(word)))
+  if (others.length) sections.push({ word: "Autres", choices: others })
+  const tile = (choice: BackgroundChoice, key: string) => <button key={key} type="button" onClick={choice.pick} title={choice.keywords.length ? `${choice.label} · ${choice.keywords.join(", ")}` : choice.label} className="group grid gap-1 rounded-xl border bg-card/60 p-1.5 text-center transition hover:border-primary/50 hover:bg-primary/5">
+    {/* eslint-disable-next-line @next/next/no-img-element */}
+    <img src={choice.src} alt="" loading="lazy" className="aspect-square w-full object-contain transition group-hover:scale-[1.03]" />
+    <span className="truncate text-xs font-medium">{choice.label}</span>
+  </button>
   return <div className="grid gap-3">
-    <div className={cn("grid gap-2", compact ? "grid-cols-3" : "grid-cols-3 sm:gap-3")}>
-      {builtinBackgroundKeys.map((key) => <button key={key} type="button" onClick={() => onBuiltin(key)} className="group grid gap-1 rounded-xl border bg-card/60 p-1.5 text-center transition hover:border-primary/50 hover:bg-primary/5">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={builtinBackgrounds[key].src} alt="" loading="lazy" className="aspect-square w-full object-contain transition group-hover:scale-[1.03]" />
-        <span className="text-xs font-medium">{builtinBackgrounds[key].label}</span>
-      </button>)}
-    </div>
+    {library
+      ? <div className={cn("grid gap-3 overflow-y-auto pr-1", compact ? "max-h-[22rem]" : "max-h-[50vh]")}>
+        {prefer && !groups.has(preferred) && <p className={hintText}>Aucun fond n’a encore le mot-clé « {prefer} » : donne-le à une image dans Administration › Extensions (la roue d’Eraser Doc), elle sera proposée ici en premier.</p>}
+        {sections.map((section) => <section key={section.word} aria-label={section.word} className="grid gap-1.5">
+          <p className={cn("text-[10px] font-semibold uppercase tracking-[.16em]", keywordKey(section.word) === preferred ? "text-primary" : "text-muted-foreground")}>{section.word}</p>
+          <div className={cn("grid gap-2", compact ? "grid-cols-3" : "grid-cols-3 sm:grid-cols-4 sm:gap-3")}>{section.choices.map((choice) => tile(choice, `${section.word}:${choice.id}`))}</div>
+        </section>)}
+      </div>
+      : <div className={cn("grid gap-2", compact ? "grid-cols-3" : "grid-cols-3 sm:gap-3")}>{choices.map((choice) => tile(choice, choice.id))}</div>}
     <div className="grid gap-2 sm:grid-cols-2">
       <label className="flex h-9 cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed bg-background text-sm font-medium transition hover:border-primary/50 hover:bg-primary/5">
         <Upload className="size-4" />Image de l’ordinateur
@@ -301,7 +360,7 @@ function BackgroundChoices({ onBuiltin, onFile, onUrl, compact = false }: { onBu
 
 /* ---------- la page ---------- */
 
-export function DocumentStudio({ campaignId, initialDocuments, initialTemplates = [], features = [], sessions, players, merchants = [], npcs = [], initialDocumentId = "", initialSessionId = "", startNew = false }: {
+export function DocumentStudio({ campaignId, initialDocuments, initialTemplates = [], features = [], sessions, players, merchants = [], npcs = [], library = null, initialDocumentId = "", initialSessionId = "", startNew = false }: {
   campaignId: string
   initialDocuments: CampaignDocumentRecord[]
   /** Les modèles du compte, dans toutes ses campagnes. */
@@ -313,6 +372,8 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   players: DocumentRecipient[]
   merchants?: DocumentRecipient[]
   npcs?: DocumentRecipient[]
+  /** La bibliothèque des fonds (roue de réglages d'Eraser Doc), et les mots-clés des fonds fournis. */
+  library?: BackgroundLibrary | null
   initialDocumentId?: string
   initialSessionId?: string
   startNew?: boolean
@@ -325,6 +386,12 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   const journalOn = features.includes("journal")
   // Sans « pages », l'Eraser installé ne garde que la première page : l'éditeur n'en propose pas d'autre.
   const pagesOn = features.includes("pages")
+  // « fonds » : la bibliothèque et les mots-clés ; « couvertures » : couverture et image de fin ;
+  // « relief » : relief et métal des zones de texte. Sans eux, l'Eraser installé les effacerait.
+  const fondsOn = features.includes("fonds")
+  const coversOn = pagesOn && features.includes("couvertures")
+  const reliefOn = features.includes("relief")
+  const backgroundLibrary = fondsOn ? library ?? { backgrounds: [], builtin: null } : null
   const [documents, setDocuments] = useState(initialDocuments)
   const [templates, setTemplates] = useState(initialTemplates)
   const [draft, setDraft] = useState<Draft | null>(() => {
@@ -354,6 +421,8 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   const [newFolderFor, setNewFolderFor] = useState<string | null>(null)
   const [copying, setCopying] = useState(false)
   const [addingPage, setAddingPage] = useState(false)
+  // La couverture ou l'image de fin qu'on est en train d'ajouter (son choix de fond est ouvert).
+  const [addingRole, setAddingRole] = useState<DocumentPageRole | null>(null)
   const lastHistory = useRef({ key: "", at: 0 })
   const focusSnapshot = useRef<{ id: string; snapshot: Snapshot; text: string } | null>(null)
   const imageInput = useRef<HTMLInputElement>(null)
@@ -660,6 +729,18 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   }
 
   const patchZone = (patch: Partial<DocumentZone>, key: string) => { if (selectedZone) changeZone(selectedZone.id, (zone) => ({ ...zone, ...patch }), key) }
+  // Une lumière ne se voit pas en mode « produit » (il ne fait qu'assombrir) : un effet passe la zone en Normal.
+  const lightBlend = (zone: DocumentZone) => zoneBlend(zone) === "multiply" ? { blend: "normal" as const, ink: false } : {}
+  /** Le relief de la zone choisie : ses réglages à la mesure du texte la première fois, rien pour « À plat ». */
+  function setRelief(relief: DocumentRelief | "none") {
+    if (!selectedZone) return
+    if (relief === "none") patchZone({ relief: undefined, reliefLight: undefined, reliefDepth: undefined, reliefSoftness: undefined, reliefContrast: undefined }, "relief")
+    else patchZone({ ...(selectedZone.relief ? {} : defaultRelief(selectedZone, relief)), relief, ...lightBlend(selectedZone) }, "relief")
+  }
+  function setMetal(metal: DocumentMetal | "none") {
+    if (!selectedZone) return
+    patchZone(metal === "none" ? { metal: undefined } : { metal, ...lightBlend(selectedZone) }, "metal")
+  }
   const patchPicture = (patch: Partial<DocumentPicture>, key: string) => { if (selectedPicture) changePicture(selectedPicture.id, (picture) => ({ ...picture, ...patch }), key) }
   const patchBox = (patch: { rotation: number }, key: string) => {
     if (selectedPicture) patchPicture(patch, key)
@@ -878,7 +959,9 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
 
   /** Une page de plus, juste après la page ouverte, aussitôt ouverte. `patch` : ce qui vient avec elle (dessins, aperçus). */
   function insertPage(current: Draft, added: DraftPage, patch: Partial<Pick<Draft, "paint" | "previews" | "uploads">> = {}) {
-    const at = pageIndex(current) + 1
+    // Une page ordinaire va juste après la page ouverte, jamais après l'image de fin.
+    const end = current.pages.findIndex((candidate) => candidate.content.role === "end")
+    const at = Math.min(pageIndex(current) + 1, end >= 0 ? end : current.pages.length)
     remember(snapshotOf(current))
     ;(document.activeElement as HTMLElement | null)?.blur?.()
     setSelectedId(null)
@@ -924,17 +1007,51 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
     insertPage(draft, { id: crypto.randomUUID(), background: current.background, content: copy.content, uploadFile: file, uploadPreview: file ? URL.createObjectURL(file) : "" }, { paint, previews, uploads })
   }
 
+  /** La page ouverte peut-elle avancer (`1`) ou reculer (`-1`) ? La couverture et l'image de fin restent à leur place. */
+  function canMovePage(current: Draft | null, step: 1 | -1) {
+    if (!current) return false
+    const from = pageIndex(current)
+    const to = from + step
+    return Boolean(current.pages[to]) && !current.pages[from].content.role && !current.pages[to].content.role
+  }
+
   /** Avance (`1`) ou recule (`-1`) la page ouverte d'une place. */
   function movePage(step: 1 | -1) {
-    if (!draft) return
+    if (!draft || !canMovePage(draft, step)) return
     const from = pageIndex(draft)
     const to = from + step
-    if (to < 0 || to >= draft.pages.length) return
     remember(snapshotOf(draft))
     const pages = [...draft.pages]
     const [moved] = pages.splice(from, 1)
     pages.splice(to, 0, moved)
     setDraft({ ...draft, pages, page: to })
+  }
+
+  /**
+   * Une couverture (toujours la première page) ou une image de fin (toujours la dernière), sur le
+   * fond choisi. La couverture arrive avec le titre du document au milieu (en or et en relief si
+   * Eraser sait les garder) ; l'image de fin, vide. On écrit sur l'une et l'autre comme sur une page.
+   */
+  function addRolePage(role: DocumentPageRole, background: DocumentBackground, file?: File) {
+    if (!draft || draft.pages.length >= MAX_PAGES || draft.pages.some((candidate) => candidate.content.role === role)) return
+    const height = background.kind === "builtin" ? documentFromBuiltin(background.key).height : DOCUMENT_WIDTH
+    const title = role === "cover" ? newDocumentZone({
+      // Assez haute pour un titre sur deux lignes.
+      x: 110, y: height * 0.32 - 130, width: DOCUMENT_WIDTH - 220, height: 260, font: "cinzel", size: 76, align: "center", valign: "middle",
+      paragraphs: plainParagraphs(draft.title.trim() || "Titre"),
+      ...(reliefOn ? { metal: "gold" as const, blend: "normal" as const, ink: false, ...defaultRelief({ size: 76 }, "raised") } : {}),
+    }) : null
+    const added: DraftPage = {
+      id: crypto.randomUUID(), background,
+      content: { version: 1, height, zones: title ? [title] : [], lines: [], shapes: [], pictures: [], order: title ? [title.id] : [], role },
+      uploadFile: file ?? null, uploadPreview: file ? URL.createObjectURL(file) : "",
+    }
+    const at = role === "cover" ? 0 : draft.pages.length
+    remember(snapshotOf(draft))
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    setSelectedId(null)
+    setDraft((latest) => latest && { ...latest, pages: [...latest.pages.slice(0, at), added, ...latest.pages.slice(at)], page: at })
+    setAddingRole(null)
   }
 
   /** Retire la page ouverte (jamais la dernière qui reste) : Ctrl+Z la remet. */
@@ -1285,7 +1402,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
             <PopoverTrigger asChild><Button type="button" variant="outline" title={pageCount > 1 ? `Le fond de la page ${pageIndex(draft) + 1}` : "Le fond du document"}><FileImage />Fond</Button></PopoverTrigger>
             <PopoverContent align="end" className="w-[26rem] max-w-[calc(100vw-2rem)]">
               <p className="mb-2 text-xs font-semibold uppercase tracking-[.16em] text-muted-foreground">{pageCount > 1 ? `Changer le fond de la page ${pageIndex(draft) + 1}` : "Changer le fond"}</p>
-              <BackgroundChoices compact onBuiltin={(key) => changeBackground({ kind: "builtin", key })} onFile={(file) => changeBackground({ kind: "upload" }, file)} onUrl={(url) => changeBackground({ kind: "url", url })} />
+              <BackgroundChoices compact library={backgroundLibrary} prefer={page?.content.role === "cover" ? COVER_KEYWORD : page?.content.role === "end" ? END_KEYWORD : ""} onBuiltin={(key) => changeBackground({ kind: "builtin", key })} onLibrary={(id) => changeBackground({ kind: "library", id })} onFile={(file) => changeBackground({ kind: "upload" }, file)} onUrl={(url) => changeBackground({ kind: "url", url })} />
               <p className={cn(hintText, "mt-2")}>{pageCount > 1 ? "Le texte, les lignes, les images et les dessins restent à leur place ; les autres pages gardent leur fond." : "Le texte, les lignes, les images et les dessins restent à leur place."}</p>
             </PopoverContent>
           </Popover>
@@ -1444,6 +1561,32 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
                 </>}
               </PopoverContent>
             </Popover>
+            {reliefOn && <Popover>
+              <PopoverTrigger asChild><Button type="button" size="sm" variant={selectedZone?.relief || selectedZone?.metal ? "secondary" : "ghost"} disabled={!selectedZone} onMouseDown={(event) => event.preventDefault()} title="Relief (sortant, gravé) et texte métallisé (or, argent…) : pour un titre"><Sparkles />Effets</Button></PopoverTrigger>
+              <PopoverContent align="start" className="grid w-80 gap-3" onOpenAutoFocus={(event) => event.preventDefault()}>
+                {selectedZone && <>
+                  <p className={fieldLabel}>Relief</p>
+                  <Segmented<DocumentRelief | "none"> ariaLabel="Relief" value={selectedZone.relief ?? "none"} onChange={setRelief} options={reliefKinds.map((kind) => ({ value: kind.value, label: kind.label, title: kind.title }))} />
+                  {selectedZone.relief && <>
+                    <div className="grid gap-1.5">
+                      <Range text="La lumière vient de" value={selectedZone.reliefLight ?? 315} min={0} max={359} step={1} format={(value) => `${Math.round(value)}°`} onChange={(reliefLight) => patchZone({ reliefLight }, "reliefLight")} />
+                      <div className="flex flex-wrap gap-1">{lightDirections.map((direction) => <Button key={direction.angle} type="button" size="xs" variant={Math.round(selectedZone.reliefLight ?? 315) === direction.angle ? "secondary" : "ghost"} title={direction.title} aria-label={direction.title} onClick={() => patchZone({ reliefLight: direction.angle }, "reliefLight-preset")}>{direction.arrow}</Button>)}</div>
+                    </div>
+                    <Range text="Profondeur" value={selectedZone.reliefDepth ?? 2} min={0.2} max={30} step={0.2} format={(value) => value.toLocaleString("fr-FR", { maximumFractionDigits: 1 })} onChange={(reliefDepth) => patchZone({ reliefDepth }, "reliefDepth")} />
+                    <Range text="Douceur de l’ombre" value={selectedZone.reliefSoftness ?? 1} min={0} max={20} step={0.2} format={(value) => value ? value.toLocaleString("fr-FR", { maximumFractionDigits: 1 }) : "Nette"} onChange={(reliefSoftness) => patchZone({ reliefSoftness }, "reliefSoftness")} />
+                    <Range text="Contraste" value={Math.round((selectedZone.reliefContrast ?? 0.6) * 100)} min={10} max={100} step={1} format={(value) => `${value} %`} onChange={(value) => patchZone({ reliefContrast: value / 100 }, "reliefContrast")} />
+                  </>}
+                  <p className={fieldLabel}>Métal</p>
+                  <div className="flex flex-wrap gap-1" role="radiogroup" aria-label="Métal">
+                    <Button type="button" size="xs" variant={selectedZone.metal ? "ghost" : "secondary"} role="radio" aria-checked={!selectedZone.metal} onClick={() => setMetal("none")}>À l’encre</Button>
+                    {metals.map((metal) => <Button key={metal.value} type="button" size="xs" variant={selectedZone.metal === metal.value ? "secondary" : "ghost"} role="radio" aria-checked={selectedZone.metal === metal.value} onClick={() => setMetal(metal.value)}>
+                      <span className="size-3 rounded-full border border-black/15" style={{ background: metalGradientCss(metal.value) }} />{metal.label}
+                    </Button>)}
+                  </div>
+                  <p className={hintText}>Un titre en or en relief : Sortant, puis Or. La lumière se règle comme le soleil sur le papier ; la fusion passe en Normal pour que la lumière se voie.</p>
+                </>}
+              </PopoverContent>
+            </Popover>}
           </>}
 
           {/* Ce qu'on fait de l'élément choisi */}
@@ -1465,10 +1608,11 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
           <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto px-0.5 py-1">
             {draft.pages.map((candidate, index) => {
               const active = index === pageIndex(draft)
-              return <button key={candidate.id} type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => goToPage(index)} aria-current={active ? "page" : undefined} title={`Page ${index + 1}`} aria-label={`Page ${index + 1}`} className={cn("relative h-14 w-11 shrink-0 overflow-hidden rounded-md border bg-muted/40 transition", active ? "border-primary ring-2 ring-primary/35" : "opacity-80 hover:border-primary/50 hover:opacity-100")}>
+              const name = pageName(candidate.content.role, index)
+              return <button key={candidate.id} type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => goToPage(index)} aria-current={active ? "page" : undefined} title={name} aria-label={name} className={cn("relative h-14 w-11 shrink-0 overflow-hidden rounded-md border bg-muted/40 transition", candidate.content.role && "border-amber-600/50", active ? "border-primary ring-2 ring-primary/35" : "opacity-80 hover:border-primary/50 hover:opacity-100")}>
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={pageBackgroundSrc(campaignId, draft, candidate)} alt="" loading="lazy" draggable={false} className="size-full object-cover" />
-                <span className={cn("absolute bottom-0.5 right-0.5 min-w-4 rounded px-1 text-center text-[10px] font-semibold tabular-nums", active ? "bg-primary text-primary-foreground" : "bg-background/85")}>{index + 1}</span>
+                <span className={cn("absolute bottom-0.5 right-0.5 min-w-4 rounded px-1 text-center text-[10px] font-semibold tabular-nums", active ? "bg-primary text-primary-foreground" : "bg-background/85")}>{candidate.content.role === "cover" ? "Couv." : candidate.content.role === "end" ? "Fin" : index + 1}</span>
               </button>
             })}
             <Popover open={addingPage} onOpenChange={setAddingPage}>
@@ -1476,22 +1620,34 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
                 <button type="button" disabled={pageCount >= MAX_PAGES} onMouseDown={(event) => event.preventDefault()} title={pageCount >= MAX_PAGES ? `${MAX_PAGES} pages au plus` : "Ajouter une page"} aria-label="Ajouter une page" className="flex h-14 w-11 shrink-0 items-center justify-center rounded-md border border-dashed text-muted-foreground transition hover:border-primary/50 hover:bg-primary/5 hover:text-primary disabled:opacity-40"><FilePlus2 className="size-4" /></button>
               </PopoverTrigger>
               <PopoverContent align="start" className="grid w-[26rem] max-w-[calc(100vw-2rem)] gap-3">
-                <p className="text-xs font-semibold uppercase tracking-[.16em] text-muted-foreground">Une page après la page {pageIndex(draft) + 1}</p>
+                <p className="text-xs font-semibold uppercase tracking-[.16em] text-muted-foreground">{page.content.role === "end" ? "Une page avant l’image de fin" : `Une page après : ${pageName(page.content.role, pageIndex(draft)).toLocaleLowerCase("fr")}`}</p>
                 <button type="button" onClick={() => void addPageOnSameBackground()} className="flex items-center gap-3 rounded-xl border bg-card/60 p-2 text-left transition hover:border-primary/50 hover:bg-primary/5">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={backgroundSrc} alt="" className="size-12 shrink-0 rounded-md object-cover" />
                   <span className="min-w-0"><span className="block text-sm font-medium">Le même fond</span><span className={hintText}>La suite de la page : ses zones de texte, vides, au même endroit.</span></span>
                 </button>
                 <p className="text-xs font-semibold uppercase tracking-[.16em] text-muted-foreground">Ou un autre fond</p>
-                <BackgroundChoices compact onBuiltin={(key) => addPageOn({ kind: "builtin", key })} onFile={(file) => addPageOn({ kind: "upload" }, file)} onUrl={(url) => addPageOn({ kind: "url", url })} />
+                <BackgroundChoices compact library={backgroundLibrary} onBuiltin={(key) => addPageOn({ kind: "builtin", key })} onLibrary={(id) => addPageOn({ kind: "library", id })} onFile={(file) => addPageOn({ kind: "upload" }, file)} onUrl={(url) => addPageOn({ kind: "url", url })} />
               </PopoverContent>
             </Popover>
+            {coversOn && (["cover", "end"] as const).filter((role) => !draft.pages.some((candidate) => candidate.content.role === role)).map((role) => <Popover key={role} open={addingRole === role} onOpenChange={(open) => setAddingRole(open ? role : null)}>
+              <PopoverTrigger asChild>
+                <button type="button" disabled={pageCount >= MAX_PAGES} onMouseDown={(event) => event.preventDefault()} title={role === "cover" ? "Ajouter une couverture : toujours la première page" : "Ajouter une image de fin : toujours la dernière page"} className="flex h-14 shrink-0 flex-col items-center justify-center gap-0.5 rounded-md border border-dashed px-2 text-[10px] font-medium text-muted-foreground transition hover:border-primary/50 hover:bg-primary/5 hover:text-primary disabled:opacity-40">
+                  {role === "cover" ? <BookOpen className="size-4" /> : <BookMarked className="size-4" />}{role === "cover" ? "Couverture" : "Fin"}
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="grid w-[26rem] max-w-[calc(100vw-2rem)] gap-3">
+                <p className="text-xs font-semibold uppercase tracking-[.16em] text-muted-foreground">{role === "cover" ? "Une couverture, en première page" : "Une image de fin, en dernière page"}</p>
+                <p className={hintText}>{role === "cover" ? "Le titre du document y est déjà posé : écris-y ce que tu veux, comme sur une page." : "Écris-y ce que tu veux (une signature, un sceau), comme sur une page."}</p>
+                <BackgroundChoices compact library={backgroundLibrary} prefer={role === "cover" ? COVER_KEYWORD : END_KEYWORD} onBuiltin={(key) => addRolePage(role, { kind: "builtin", key })} onLibrary={(id) => addRolePage(role, { kind: "library", id })} onFile={(file) => addRolePage(role, { kind: "upload" }, file)} onUrl={(url) => addRolePage(role, { kind: "url", url })} />
+              </PopoverContent>
+            </Popover>)}
           </div>
           <ToolButton label="Page suivante (Page ↓)" disabled={pageIndex(draft) >= pageCount - 1} onClick={() => goToPage(pageIndex(draft) + 1)}><ChevronRight className="size-4" /></ToolButton>
           <Separator />
-          <span className="px-1 text-xs tabular-nums text-muted-foreground">Page {pageIndex(draft) + 1} / {pageCount}</span>
-          <ToolButton label="Placer cette page avant la précédente" disabled={pageIndex(draft) === 0} onClick={() => movePage(-1)}><MoveLeft className="size-4" /></ToolButton>
-          <ToolButton label="Placer cette page après la suivante" disabled={pageIndex(draft) >= pageCount - 1} onClick={() => movePage(1)}><MoveRight className="size-4" /></ToolButton>
+          <span className="px-1 text-xs tabular-nums text-muted-foreground">{page.content.role ? pageName(page.content.role, pageIndex(draft)) : `Page ${pageIndex(draft) + 1} / ${pageCount}`}</span>
+          <ToolButton label={page.content.role ? "La couverture et l’image de fin restent à leur place" : "Placer cette page avant la précédente"} disabled={!canMovePage(draft, -1)} onClick={() => movePage(-1)}><MoveLeft className="size-4" /></ToolButton>
+          <ToolButton label={page.content.role ? "La couverture et l’image de fin restent à leur place" : "Placer cette page après la suivante"} disabled={!canMovePage(draft, 1)} onClick={() => movePage(1)}><MoveRight className="size-4" /></ToolButton>
           <ToolButton label="Dupliquer cette page (fond, texte, dessins)" disabled={pageCount >= MAX_PAGES} onClick={() => void duplicatePage()}><CopyPlus className="size-4" /></ToolButton>
           <ToolButton label={pageCount < 2 ? "Un document garde au moins une page" : "Retirer cette page (Ctrl+Z la remet)"} disabled={pageCount < 2} onClick={deletePage}><Trash2 className="size-4 text-destructive/80" /></ToolButton>
         </div>}
@@ -1536,7 +1692,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
         {/* Ce qu'on fait du document */}
         <div className="flex flex-wrap items-center gap-2 rounded-2xl border bg-card/60 p-2.5">
           <span className={cn(fieldLabel, "mr-auto")}>{draft.isNew ? "Pas encore enregistré" : saved?.updatedAt ? `Enregistré le ${new Date(saved.updatedAt).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" })}` : ""}{dirty && !draft.isNew ? " · modifications non enregistrées" : ""}</span>
-          <Button type="button" variant="outline" size="sm" disabled={!draft.renderVersion} title={draft.renderVersion ? "Voir le document comme le joueur le lira" : "Enregistre d’abord le document"} onClick={() => setViewing({ campaignId, documentId: draft.id, title: draft.title, version: draft.renderVersion, pages: 1 + (saved?.pages?.length ?? 0) })}><Eye />Aperçu</Button>
+          <Button type="button" variant="outline" size="sm" disabled={!draft.renderVersion} title={draft.renderVersion ? "Voir le document comme le joueur le lira" : "Enregistre d’abord le document"} onClick={() => setViewing({ campaignId, documentId: draft.id, title: draft.title, version: draft.renderVersion, pages: 1 + (saved?.pages?.length ?? 0), roles: saved ? [saved.content.role ?? "", ...(saved.pages ?? []).map((candidate) => candidate.content.role ?? "")] : [] })}><Eye />Aperçu</Button>
           <GiveDocumentButton campaignId={campaignId} documentId={draft.id} title={draft.title} players={players} merchants={merchants} npcs={npcs} disabledReason={!draft.renderVersion ? "Enregistre d’abord le document" : dirty ? "Enregistre d’abord tes modifications" : ""} onGiven={(text) => setMessage({ tone: "ok", text })} />
           <Button type="button" variant="outline" size="sm" disabled={draft.isNew || dirty || copying} title={draft.isNew ? "Enregistre d’abord le document" : dirty ? "Enregistre d’abord tes modifications" : "Une copie de ce document, à modifier"} onClick={duplicateDocument}>{copying ? <LoaderCircle className="animate-spin" /> : <CopyPlus />}Dupliquer</Button>
           {templatesOn && <Button type="button" variant={draft.template ? "secondary" : "ghost"} size="sm" aria-pressed={draft.template} title={draft.template ? "C’est un modèle : il est proposé dans « Nouveau document », dans toutes tes campagnes. Clique pour le retirer des modèles." : "En faire un modèle : il sera proposé dans « Nouveau document », dans toutes tes campagnes"} onClick={() => void place(draft, { template: !draft.template })}><LayoutTemplate />{draft.template ? "Modèle" : "En faire un modèle"}</Button>}
@@ -1567,7 +1723,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
           {copying && <p className="flex items-center gap-2 text-xs text-muted-foreground" aria-busy="true"><LoaderCircle className="size-3.5 animate-spin" />Copie du modèle…</p>}
           <p className="mt-1 text-xs font-semibold uppercase tracking-[.16em] text-muted-foreground">Ou un fond</p>
         </div>}
-        <BackgroundChoices onBuiltin={(key) => create({ kind: "builtin", key })} onFile={(file) => create({ kind: "upload" }, file)} onUrl={(url) => create({ kind: "url", url })} />
+        <BackgroundChoices library={backgroundLibrary} onBuiltin={(key) => create({ kind: "builtin", key })} onLibrary={(id) => create({ kind: "library", id })} onFile={(file) => create({ kind: "upload" }, file)} onUrl={(url) => create({ kind: "url", url })} />
       </DialogContent>
     </Dialog>
 

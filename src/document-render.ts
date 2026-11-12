@@ -1,7 +1,7 @@
 import { DOCUMENT_WIDTH, type DocumentBackground, type DocumentContent, type DocumentFontKey, type DocumentLine, type DocumentPicture, type DocumentRun, type DocumentShape, type DocumentZone } from "@/lib/document-model"
 
-import { builtinBackgrounds, documentFonts } from "./document-assets"
-import { blendCanvas, lineCap, lineDash, orderedElements, shapeGradient, shapePath, withAlpha, zoneBlend } from "./document-elements"
+import { builtinBackgrounds, documentFonts, libraryBackgroundUrl } from "./document-assets"
+import { blendCanvas, lineCap, lineDash, metalStops, orderedElements, reliefShadows, shapeGradient, shapePath, withAlpha, zoneBlend } from "./document-elements"
 
 /**
  * Le rendu d'un document : son fond, puis ses éléments dans l'ordre des calques (zones de texte,
@@ -37,6 +37,7 @@ export function loadDocumentFonts() {
 export function backgroundSource(background: DocumentBackground, uploadedUrl: string) {
   if (background.kind === "builtin") return builtinBackgrounds[background.key].src
   if (background.kind === "upload") return uploadedUrl
+  if (background.kind === "library") return libraryBackgroundUrl(background.id)
   return `/api/tokens/source?url=${encodeURIComponent(background.url)}`
 }
 
@@ -116,18 +117,20 @@ function layoutParagraph(context: CanvasRenderingContext2D, zone: DocumentZone, 
   }
 }
 
-/** Dessine une zone ; `scale` : pixels du canvas par unité du document. */
-export function drawZone(context: CanvasRenderingContext2D, zone: DocumentZone, scale: number) {
+type ZoneLayout = { size: number; width: number; height: number; lineHeight: number; lines: Line[]; top: number; ascent: number; baseline: number }
+
+/**
+ * Prépare le dessin d'une zone dans `context` : le repère de la zone (centre, inclinaison, coin
+ * haut gauche), l'espacement des lettres, et la coupure de ses lignes.
+ */
+function prepareZone(context: CanvasRenderingContext2D, zone: DocumentZone, scale: number): ZoneLayout {
   const size = zone.size * scale
   const width = zone.width * scale
   const height = zone.height * scale
   const lineHeight = size * zone.lineHeight
-  context.save()
   context.translate((zone.x + zone.width / 2) * scale, (zone.y + zone.height / 2) * scale)
   context.rotate((zone.rotation * Math.PI) / 180)
   context.translate(-width / 2, -height / 2)
-  context.globalAlpha = zone.opacity
-  context.globalCompositeOperation = blendCanvas(zoneBlend(zone))
   context.textBaseline = "alphabetic"
   const spacing = zone.letterSpacing * scale
   if ("letterSpacing" in context) (context as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = `${spacing}px`
@@ -140,6 +143,15 @@ export function drawZone(context: CanvasRenderingContext2D, zone: DocumentZone, 
   const ascent = metrics.fontBoundingBoxAscent || size * 0.8
   const descent = metrics.fontBoundingBoxDescent || size * 0.2
   const baseline = (lineHeight - (ascent + descent)) / 2 + ascent
+  return { size, width, height, lineHeight, lines, top, ascent, baseline }
+}
+
+/**
+ * Dessine les lignes d'une zone préparée. `fill` : la couleur (ou le dégradé) de chaque ligne,
+ * sinon l'encre de chaque morceau ; `decorations` : souligné et barré.
+ */
+function paintZoneLines(context: CanvasRenderingContext2D, zone: DocumentZone, layout: ZoneLayout, fill: ((line: number) => string | CanvasGradient) | null, decorations: boolean) {
+  const { size, width, lineHeight, lines, top, ascent, baseline } = layout
   lines.forEach((line, index) => {
     const extra = width - line.width
     const justify = zone.align === "justify" && line.soft && line.spaces > 0 && extra > 0
@@ -147,17 +159,102 @@ export function drawZone(context: CanvasRenderingContext2D, zone: DocumentZone, 
     const y = top + index * lineHeight + baseline
     for (const piece of line.pieces) {
       const pieceWidth = piece.width + (justify && piece.space ? extra / line.spaces : 0)
-      if (!piece.space || piece.run.underline || piece.run.strike) {
-        context.fillStyle = piece.run.color || zone.color
+      if (!piece.space || (decorations && (piece.run.underline || piece.run.strike))) {
         context.font = zoneFont(zone, piece.run, size)
+        context.fillStyle = fill ? fill(index) : piece.run.color || zone.color
         if (!piece.space) context.fillText(piece.text, x, y)
-        const thickness = Math.max(1, size * 0.055)
-        if (piece.run.underline) context.fillRect(x, y + size * 0.1, pieceWidth, thickness)
-        if (piece.run.strike) context.fillRect(x, y - ascent * 0.3, pieceWidth, thickness)
+        if (decorations) {
+          // Souligné et barré : dans l'encre du morceau, même sur un texte métallisé (comme la scène).
+          context.fillStyle = piece.run.color || zone.color
+          const thickness = Math.max(1, size * 0.055)
+          if (piece.run.underline) context.fillRect(x, y + size * 0.1, pieceWidth, thickness)
+          if (piece.run.strike) context.fillRect(x, y - ascent * 0.3, pieceWidth, thickness)
+        }
       }
       x += pieceWidth
     }
   })
+}
+
+/** Dessine une zone ; `scale` : pixels du canvas par unité du document. */
+export function drawZone(context: CanvasRenderingContext2D, zone: DocumentZone, scale: number) {
+  if (zone.relief || zone.metal) { drawZoneWithEffects(context, zone, scale); return }
+  context.save()
+  context.globalAlpha = zone.opacity
+  context.globalCompositeOperation = blendCanvas(zoneBlend(zone))
+  const layout = prepareZone(context, zone, scale)
+  paintZoneLines(context, zone, layout, null, true)
+  context.restore()
+}
+
+let effectLayer: HTMLCanvasElement | null = null
+let glyphLayer: HTMLCanvasElement | null = null
+
+/** Une toile de travail de la taille du rendu, vidée. */
+function scratch(canvas: HTMLCanvasElement | null, width: number, height: number) {
+  const next = canvas ?? document.createElement("canvas")
+  if (next.width !== width || next.height !== height) { next.width = width; next.height = height }
+  const context = next.getContext("2d")
+  if (!context) throw new Error("Le navigateur ne peut pas dessiner le document.")
+  context.setTransform(1, 0, 0, 1, 0, 0)
+  context.clearRect(0, 0, width, height)
+  context.globalAlpha = 1
+  context.globalCompositeOperation = "source-over"
+  context.filter = "none"
+  return { canvas: next, context }
+}
+
+/**
+ * Une zone en relief ou métallisée, dessinée à part puis fondue d'un seul tenant (comme la scène,
+ * où lumière, ombres et texte sont un même bloc) : d'abord la lumière et les ombres du relief (les
+ * lettres, floutées et décalées, de la plus basse à la plus haute), puis le texte lui-même, dans
+ * son encre ou dans le dégradé de son métal, recommencé à chaque ligne.
+ */
+function drawZoneWithEffects(context: CanvasRenderingContext2D, zone: DocumentZone, scale: number) {
+  const { width, height } = context.canvas
+  const effects = scratch(effectLayer, width, height)
+  effectLayer = effects.canvas
+  const layer = effects.context
+  const angle = (zone.rotation * Math.PI) / 180
+  for (const shadow of [...reliefShadows(zone)].reverse()) {
+    // Les lettres de l'ombre, pleines, sur leur propre toile ; floutées et décalées en la posant.
+    const glyphs = scratch(glyphLayer, width, height)
+    glyphLayer = glyphs.canvas
+    glyphs.context.save()
+    const layout = prepareZone(glyphs.context, zone, scale)
+    paintZoneLines(glyphs.context, zone, layout, () => shadow.color, false)
+    glyphs.context.restore()
+    // Le décalage suit l'inclinaison de la zone (le `text-shadow` de la scène tourne avec elle).
+    const dx = (shadow.x * Math.cos(angle) - shadow.y * Math.sin(angle)) * scale
+    const dy = (shadow.x * Math.sin(angle) + shadow.y * Math.cos(angle)) * scale
+    layer.save()
+    layer.globalAlpha = shadow.alpha
+    // Le flou de `text-shadow` (son rayon) vaut deux écarts types : `blur()` prend l'écart type.
+    if (shadow.blur > 0) layer.filter = `blur(${(shadow.blur * scale) / 2}px)`
+    layer.drawImage(glyphs.canvas, dx, dy)
+    layer.restore()
+  }
+  layer.save()
+  const layout = prepareZone(layer, zone, scale)
+  const stops = metalStops(zone.metal)
+  const gradients = new Map<number, CanvasGradient>()
+  const metal = stops.length ? (line: number) => {
+    let gradient = gradients.get(line)
+    if (!gradient) {
+      const lineTop = layout.top + line * layout.lineHeight
+      gradient = layer.createLinearGradient(0, lineTop, 0, lineTop + layout.lineHeight)
+      for (const [offset, color] of stops) gradient.addColorStop(offset, color)
+      gradients.set(line, gradient)
+    }
+    return gradient
+  } : null
+  paintZoneLines(layer, zone, layout, metal, true)
+  layer.restore()
+  context.save()
+  context.setTransform(1, 0, 0, 1, 0, 0)
+  context.globalAlpha = zone.opacity
+  context.globalCompositeOperation = blendCanvas(zoneBlend(zone))
+  context.drawImage(effects.canvas, 0, 0)
   context.restore()
 }
 

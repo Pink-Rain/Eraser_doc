@@ -9,7 +9,10 @@ est décrit dans la section « Extensions » de l'`ARCHITECTURE.md` d'Eraser.
 ## Ce qui vit où
 
 - Ici : l'éditeur (`src/document-studio.tsx` ; la scène `src/document-stage.tsx` ; les petits
-  panneaux `src/document-tools.tsx` ; la liste rangée en dossiers `src/document-library.tsx`), son
+  panneaux `src/document-tools.tsx` ; la liste rangée en dossiers `src/document-library.tsx`), le
+  démarrage (`src/boot.tsx`, API 4 : la roue `src/settings-gear.tsx` sur la ligne d'Administration ›
+  Extensions, administrateurs ; sa fenêtre, la bibliothèque des fonds, `src/background-library.tsx`,
+  chargée à la demande depuis `dist/parts/`), son
   rendu (`src/document-render.ts` : l'image WebP que reçoivent les joueurs et Roll20, l'impression
   JPEG du PDF), le texte riche (`src/document-text.ts`), les éléments communs à la scène et au rendu
   (`src/document-elements.ts` : ordre des calques, modes de fusion, lignes, formes, plume
@@ -20,6 +23,14 @@ est décrit dans la section « Extensions » de l'`ARCHITECTURE.md` d'Eraser.
   formes et dégradés, même mode de fusion CSS/canvas, `blendModes`), sinon l'image donnée aux
   joueurs ne ressemble plus à ce que le MJ a fait. Une forme se dessine à part puis se fond d'un
   seul tenant, comme le SVG de la scène.
+- Une zone de texte en relief (`relief`, sa lumière) ou métallisée (`metal`) se dessine en deux
+  temps des deux côtés : la lumière et les ombres (`reliefShadows` : `text-shadow` d'une copie du
+  texte posée dessous dans la scène, lettres floutées et décalées dans le rendu), puis le texte
+  (`metalStops` : un dégradé recommencé à chaque ligne), le tout fondu d'un seul tenant.
+- Les fonds se choisissent rangés par mots-clés (bibliothèque d'Eraser, `?atelier=1` : `library`) ;
+  un fond de la bibliothèque est `{ kind: "library", id }` (`libraryBackgroundUrl`). « Couverture »
+  et « Fin » proposent d'abord un fond pour la couverture et l'image de fin (`content.role` : la
+  couverture reste la première page, l'image de fin la dernière).
 - Un document : une ou plusieurs pages (30 au plus), chacune avec son fond et ses zones de texte,
   lignes, formes, images posées et calques de dessin, dans l'ordre de `content.order`. La première
   page est le `background` et le `content` du document (ce que lit un Eraser sans pages) ; les
@@ -36,7 +47,8 @@ est décrit dans la section « Extensions » de l'`ARCHITECTURE.md` d'Eraser.
 - **Seuls les types viennent du modèle d'Eraser pour les nouveautés** : une valeur nouvelle du
   modèle (liste, fonction) n'existe pas dans un Eraser plus ancien, qui prête quand même l'ancien
   module. L'éditeur lit `features` (`?atelier=1`) et ne propose un outil que si Eraser sait le
-  garder (`calques`, `formes`, `dossiers`, `modeles`, `pages`, `journal`). « Donner à… » (prêté
+  garder (`calques`, `formes`, `dossiers`, `modeles`, `pages`, `journal`, `fonds`, `couvertures`,
+  `relief`). « Donner à… » (prêté
   par Eraser) reçoit de `?atelier=1` les `players`, puis les `merchants` (les magasins
   sauvegardés : le document y est mis en vente) et les `npcs` (absents d'un Eraser plus ancien).
   L'œil du journal (`journal`) s'enregistre tout seul (`PATCH { journal }`), pour la session où le

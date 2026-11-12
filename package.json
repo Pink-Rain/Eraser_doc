@@ -5,11 +5,12 @@
   "description": "Eraser Doc : l'éditeur des documents de campagne d'Eraser, publié comme extension.",
   "eraserExtension": {
     "id": "doc",
-    "api": 2,
+    "api": 4,
     "entry": "main.js",
     "styles": [
       "main.css"
-    ]
+    ],
+    "boot": "boot.js"
   },
   "scripts": {
     "build": "node scripts/build.mjs",

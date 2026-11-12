@@ -19,7 +19,7 @@ import { LoaderCircle, ScrollText } from "lucide-react"
 import { PageLabel } from "@/components/eraser/app-shell"
 import type { CampaignDocumentRecord, DocumentRecipient } from "@/lib/document-model"
 
-import { DocumentStudio } from "./document-studio"
+import { DocumentStudio, type BackgroundLibrary } from "./document-studio"
 
 /** Ce qu'Eraser donne à l'extension (components/eraser/extension-host.tsx, API 2). */
 type EraserContext = {
@@ -33,12 +33,14 @@ type StudioData = {
   campaign: { id: string; name: string }
   documents: CampaignDocumentRecord[]
   sessions: Array<{ id: string; name: string }>
-  /** À qui donner un document : les joueurs, puis (Eraser alpha 288 et plus) les marchands (les magasins, pour l'y vendre) et les PNJ. */
+  /** À qui donner un document : les joueurs, puis (Eraser alpha 291 et plus) les marchands (les magasins, pour l'y vendre) et les PNJ. */
   players: DocumentRecipient[]
   merchants?: DocumentRecipient[]
   npcs?: DocumentRecipient[]
   /** Les modèles du compte, dans toutes ses campagnes (Eraser alpha 285 et plus). */
   templates?: CampaignDocumentRecord[]
+  /** La bibliothèque des fonds et les mots-clés des fonds fournis (Eraser alpha 291 et plus). */
+  library?: BackgroundLibrary
   /** Ce que le serveur sait garder : `dossiers`, `modeles`, `calques`, `pages`… (absent avant l'alpha 285). */
   features?: string[]
 }
@@ -70,6 +72,7 @@ function CampaignDocuments({ eraser, campaignId }: { eraser: EraserContext; camp
           players={data.players}
           merchants={data.merchants ?? []}
           npcs={data.npcs ?? []}
+          library={data.library ?? null}
           initialDocumentId={initial.documentId}
           initialSessionId={initial.sessionId}
           startNew={initial.startNew}

@@ -1,6 +1,6 @@
 import {
   DEFAULT_INK, DOCUMENT_RENDER_WIDTH, DOCUMENT_WIDTH,
-  type DocumentBlendMode, type DocumentContent, type DocumentLine, type DocumentLineStyle, type DocumentPicture, type DocumentShape, type DocumentShapeKind, type DocumentZone,
+  type DocumentBlendMode, type DocumentContent, type DocumentLine, type DocumentLineStyle, type DocumentMetal, type DocumentPicture, type DocumentRelief, type DocumentShape, type DocumentShapeKind, type DocumentZone,
 } from "@/lib/document-model"
 
 /**
@@ -109,10 +109,12 @@ export function movedInOrder(content: DocumentContent, id: string, move: 1 | -1 
 /**
  * Le contenu d'une page recopié pour une autre (dupliquer une page) : chaque élément a un nouvel
  * identifiant (l'ordre des calques suit), chaque calque de dessin un nouveau fichier (il sera
- * dessiné à part), une image posée garde le sien. `ids` et `assets` : les anciens noms et les nouveaux.
+ * dessiné à part), une image posée garde le sien ; elle n'est jamais couverture ni image de fin.
+ * `ids` et `assets` : les anciens noms et les nouveaux.
  */
 export function copiedContent(content: DocumentContent) {
-  const normalized = normalizeContent(content)
+  // La copie d'une couverture (ou d'une image de fin) est une page ordinaire.
+  const { role: _role, ...normalized } = normalizeContent(content)
   const ids = new Map<string, string>()
   const assets = new Map<string, string>()
   const fresh = (id: string) => {
@@ -146,6 +148,73 @@ export const elementLabel = (element: DocumentElement) => {
   if (element.kind === "picture") return element.picture.kind === "drawing" ? "Dessin" : "Image"
   const text = element.zone.paragraphs.map((paragraph) => paragraph.map((run) => run.text).join("")).join(" ").trim()
   return text ? `« ${text.length > 28 ? `${text.slice(0, 28)}…` : text} »` : "Texte vide"
+}
+
+/* ---------- relief et métal du texte ---------- */
+
+/** Les reliefs proposés (clés d'Eraser, `documentReliefs`) : à plat, sortant, gravé. */
+export const reliefKinds: ReadonlyArray<{ value: DocumentRelief | "none"; label: string; title: string }> = [
+  { value: "none", label: "À plat", title: "Sans relief" },
+  { value: "raised", label: "Sortant", title: "Le texte sort du papier : éclairé d'un côté, ombré de l'autre, avec son ombre portée" },
+  { value: "engraved", label: "Gravé", title: "Le texte est gravé dans le papier : ombré du côté de la lumière, éclairé de l'autre" },
+]
+
+/**
+ * Les métaux (clés d'Eraser, `documentMetals`) : un dégradé de haut en bas de chaque ligne, avec
+ * un reflet clair un peu au-dessus du milieu. Le même en CSS (scène) et dans le canvas (rendu).
+ */
+export const metals: ReadonlyArray<{ value: DocumentMetal; label: string; stops: ReadonlyArray<readonly [number, string]> }> = [
+  { value: "gold", label: "Or", stops: [[0, "#7a5410"], [0.3, "#e3bd52"], [0.46, "#fff3c2"], [0.56, "#c8952a"], [1, "#6b470c"]] },
+  { value: "silver", label: "Argent", stops: [[0, "#575c62"], [0.3, "#c9ced3"], [0.46, "#ffffff"], [0.56, "#979da3"], [1, "#4b5056"]] },
+  { value: "bronze", label: "Bronze", stops: [[0, "#4a2c10"], [0.3, "#b58048"], [0.46, "#f0cf9e"], [0.56, "#8c5a2b"], [1, "#3d230b"]] },
+  { value: "copper", label: "Cuivre", stops: [[0, "#58210b"], [0.3, "#cd6d47"], [0.46, "#ffcaa9"], [0.56, "#a64e27"], [1, "#4a1c08"]] },
+]
+const metalOf = (metal: DocumentMetal | undefined) => metals.find((candidate) => candidate.value === metal) ?? null
+export const metalStops = (metal: DocumentMetal | undefined) => metalOf(metal)?.stops ?? []
+
+/** Le dégradé d'un métal en CSS (une ligne de haut en bas). */
+export function metalGradientCss(metal: DocumentMetal | undefined) {
+  const stops = metalStops(metal)
+  return stops.length ? `linear-gradient(180deg, ${stops.map(([offset, color]) => `${color} ${Math.round(offset * 100)}%`).join(", ")})` : ""
+}
+
+/** Une ombre (ou une lumière) du relief, en unités du document, dans le repère de la zone (avant son inclinaison). */
+export type TextShadow = { x: number; y: number; blur: number; color: string; alpha: number }
+
+/**
+ * La lumière et les ombres d'un relief, de la plus haute à la plus basse (l'ordre de
+ * `text-shadow`) : un relief sortant est éclairé du côté de la lumière, ombré de l'autre, et pose
+ * son ombre portée ; un relief gravé, l'inverse (son bord du côté de la lumière est dans l'ombre).
+ * La lumière vient de `reliefLight` degrés (0 en haut, 90 à droite).
+ */
+export function reliefShadows(zone: Pick<DocumentZone, "relief" | "reliefLight" | "reliefDepth" | "reliefSoftness" | "reliefContrast">): TextShadow[] {
+  if (!zone.relief) return []
+  const angle = ((zone.reliefLight ?? 315) * Math.PI) / 180
+  const towardX = Math.sin(angle), towardY = -Math.cos(angle)
+  const depth = zone.reliefDepth ?? 2
+  const blur = zone.reliefSoftness ?? 1
+  const strength = zone.reliefContrast ?? 0.6
+  const at = (factor: number) => ({ x: n(towardX * depth * factor), y: n(towardY * depth * factor) })
+  if (zone.relief === "engraved") return [
+    { ...at(-0.5), blur, color: "#ffffff", alpha: strength },
+    { ...at(0.5), blur, color: "#000000", alpha: strength },
+  ]
+  return [
+    { ...at(0.5), blur, color: "#ffffff", alpha: strength },
+    { ...at(-0.5), blur, color: "#000000", alpha: strength },
+    { ...at(-1.4), blur: n(blur + depth), color: "#000000", alpha: n(strength * 0.45) },
+  ]
+}
+
+/** Les ombres d'un relief en `text-shadow` (unités du document : la scène est agrandie d'un bloc). */
+export function reliefShadowCss(shadows: TextShadow[]) {
+  return shadows.map((shadow) => `${shadow.x}px ${shadow.y}px ${shadow.blur}px ${withAlpha(shadow.color, shadow.alpha)}`).join(", ")
+}
+
+/** Les réglages d'un relief qu'on vient de choisir, à la mesure du texte de la zone. */
+export function defaultRelief(zone: Pick<DocumentZone, "size">, relief: DocumentRelief) {
+  const depth = Math.round(Math.max(1, zone.size * 0.04) * 10) / 10
+  return { relief, reliefLight: 315, reliefDepth: depth, reliefSoftness: Math.round(depth * 5) / 10, reliefContrast: 0.6 }
 }
 
 /* ---------- lignes ---------- */

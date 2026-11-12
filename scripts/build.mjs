@@ -84,6 +84,24 @@ await build({
   plugins: [eraserModules, reactCompiler],
   logLevel: "warning",
 })
+// Le démarrage (API 4), sur toutes les pages : la roue de réglages d'Administration › Extensions.
+// Sa fenêtre (la bibliothèque des fonds) se charge à la demande, dans dist/parts/.
+await build({
+  entryPoints: { boot: join(root, "src", "boot.tsx") },
+  outdir: dist,
+  chunkNames: "parts/[name]-[hash]",
+  splitting: true,
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  target: "es2022",
+  jsx: "automatic",
+  minify: true,
+  sourcemap: false,
+  legalComments: "none",
+  plugins: [eraserModules, reactCompiler],
+  logLevel: "warning",
+})
 const missing = [...borrowed].filter((id) => !lentIds.has(id)).sort()
 if (missing.length) throw new Error(`Eraser (${eraser}) ne prête pas : ${missing.join(", ")}. Les ajouter à components/eraser/extension-modules.ts d'Eraser (publié d'abord), ou les garder dans src/.`)
 

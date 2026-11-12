@@ -6,8 +6,10 @@
 //
 // Ce script est recopié tel quel dans chaque dépôt d'extension. Il lit, dans le package.json
 // du dossier courant, `version` et le champ `eraserExtension` :
-//   { "id": "map", "api": 1, "entry": "main.js", "styles": ["main.css"], "server": "server.mjs" }
-// (`styles` et `server` sont facultatifs). Usage : node scripts/pack-extension.mjs [dist] [release]
+//   { "id": "map", "api": 3, "entry": "main.js", "styles": ["main.css"], "server": "server.mjs",
+//     "boot": "boot.js", "globalStyles": ["global.css"] }
+// Tout est facultatif sauf `id`, `api` et un point d'entrée : `entry` (ses pages) ou `boot`
+// (lancé au démarrage, sur toutes les pages : API 3). Usage : node scripts/pack-extension.mjs [dist] [release]
 import { createHash } from "node:crypto"
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
 import { join, relative, resolve, sep } from "node:path"
@@ -19,17 +21,19 @@ export const MANIFEST_NAME = "eraser-extension.json"
 export const PACK_NAME = "eraser-extension.pack.gz"
 
 /** `files` : Map chemin relatif (« a/b.js ») → contenu. Rend le manifeste et le paquet. */
-export function packExtension({ id, version, api, entry, styles = [], server = null, files }) {
+export function packExtension({ id, version, api, entry = null, styles = [], server = null, boot = null, globalStyles = [], files }) {
   if (!/^[a-z0-9-]+$/.test(String(id))) throw new Error(`Identifiant d'extension invalide : ${id}`)
   if (!/^\d+\.\d+\.\d+(?:-[0-9a-z]+\.\d+)?$/i.test(String(version))) throw new Error(`Version invalide : ${version} (attendu : 1.2.3 ou 1.2.3-alpha.4)`)
   if (!Number.isInteger(api) || api < 1) throw new Error(`Version d'API invalide : ${api}`)
-  for (const needed of [entry, ...styles, ...(server ? [server] : [])]) {
+  if (!entry && !boot) throw new Error("Ni « entry » (ses pages) ni « boot » (son démarrage) : l'extension n'a rien à lancer.")
+  if ((boot || globalStyles.length) && api < 3) throw new Error("« boot » et « globalStyles » demandent l'API 3.")
+  for (const needed of [entry, boot, ...styles, ...globalStyles, server].filter(Boolean)) {
     if (!files.has(needed)) throw new Error(`Fichier absent du paquet : ${needed}`)
   }
   const content = {}
   for (const [path, data] of [...files.entries()].sort(([a], [b]) => a.localeCompare(b))) content[path] = Buffer.from(data).toString("base64")
   const pack = gzipSync(Buffer.from(JSON.stringify({ format: PACK_FORMAT, files: content })), { level: 9 })
-  const manifest = { id, version, api, entry, styles, server, pack: PACK_NAME, sha256: createHash("sha256").update(pack).digest("hex") }
+  const manifest = { id, version, api, entry, styles, server, ...(boot ? { boot } : {}), ...(globalStyles.length ? { globalStyles } : {}), pack: PACK_NAME, sha256: createHash("sha256").update(pack).digest("hex") }
   return { manifest, pack }
 }
 

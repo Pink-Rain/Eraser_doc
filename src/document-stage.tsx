@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils"
 
 import { documentFonts } from "./document-assets"
 import {
-  DRAWING_SCALE, blendCss, documentToPicture, lineCap, lineDash, orderedElements, paintStroke, paintStrokes, shapeGradient, shapePath, zoneBlend,
+  DRAWING_SCALE, blendCss, documentToPicture, lineCap, lineDash, metalGradientCss, orderedElements, paintStroke, paintStrokes, reliefShadowCss, reliefShadows, shapeGradient, shapePath, zoneBlend,
   type Paint, type Stroke,
 } from "./document-elements"
 import { paragraphsAreEmpty, paragraphsFromElement, paragraphsToHtml } from "./document-text"
@@ -132,6 +132,21 @@ function ZoneText({ zone, selected, interactive, onPointerDown, onText, onFocus,
     return () => observer.disconnect()
   }, [height])
 
+  // Le relief : la lumière et les ombres des lettres, sur une copie du texte posée juste dessous
+  // (transparente, seules ses ombres se voient), comme le rendu les dessine sous le texte.
+  const shadows = reliefShadows(zone)
+  // Le métal : un dégradé recommencé à chaque ligne, vu à travers les lettres.
+  const metal = metalGradientCss(zone.metal)
+  const metalStyle = metal ? {
+    backgroundImage: metal,
+    backgroundSize: `100% ${zone.size * zone.lineHeight}px`,
+    backgroundRepeat: "repeat-y",
+    WebkitBackgroundClip: "text",
+    backgroundClip: "text",
+    WebkitTextFillColor: "transparent",
+    caretColor: zone.color,
+  } as const : {}
+
   function paste(event: ReactClipboardEvent<HTMLDivElement>) {
     // Seul le texte est collé : une mise en forme venue d'ailleurs ne se dessinerait pas au rendu.
     event.preventDefault()
@@ -144,23 +159,31 @@ function ZoneText({ zone, selected, interactive, onPointerDown, onText, onFocus,
     className={cn("absolute flex flex-col", zone.valign === "middle" ? "justify-center" : zone.valign === "bottom" ? "justify-end" : "justify-start", !interactive ? "pointer-events-none" : selected ? "cursor-text" : "cursor-pointer")}
     style={{ left: zone.x, top: zone.y, width: zone.width, height: zone.height, transform: `rotate(${zone.rotation}deg)`, opacity: zone.opacity, mixBlendMode: blendCss(zoneBlend(zone)) }}
   >
-    <div
-      ref={editable}
-      contentEditable={selected && interactive}
-      suppressContentEditableWarning
-      spellCheck
-      lang="fr"
-      role="textbox"
-      aria-multiline="true"
-      aria-label="Texte de la zone"
-      onInput={(event) => onText(paragraphsFromElement(event.currentTarget))}
-      onFocus={onFocus}
-      onBlur={onBlur}
-      onPaste={paste}
-      onDrop={(event) => event.preventDefault()}
-      className="w-full select-text whitespace-pre-wrap break-words outline-none [overflow-wrap:break-word]"
-      style={zoneTextStyle(zone)}
-    />
+    <div className="relative w-full">
+      {shadows.length > 0 && <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 select-none whitespace-pre-wrap break-words [overflow-wrap:break-word] [&_*]:!text-transparent"
+        style={{ ...zoneTextStyle(zone), color: "transparent", textShadow: reliefShadowCss(shadows) }}
+        dangerouslySetInnerHTML={{ __html: paragraphsToHtml(zone.paragraphs) }}
+      />}
+      <div
+        ref={editable}
+        contentEditable={selected && interactive}
+        suppressContentEditableWarning
+        spellCheck
+        lang="fr"
+        role="textbox"
+        aria-multiline="true"
+        aria-label="Texte de la zone"
+        onInput={(event) => onText(paragraphsFromElement(event.currentTarget))}
+        onFocus={onFocus}
+        onBlur={onBlur}
+        onPaste={paste}
+        onDrop={(event) => event.preventDefault()}
+        className="relative w-full select-text whitespace-pre-wrap break-words outline-none [overflow-wrap:break-word]"
+        style={{ ...zoneTextStyle(zone), ...metalStyle }}
+      />
+    </div>
     {empty && !selected && <span className="pointer-events-none absolute inset-0 grid place-items-center text-center font-sans text-[18px] italic text-black/35">Zone vide — clique pour écrire</span>}
   </div>
 }

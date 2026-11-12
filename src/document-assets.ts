@@ -63,6 +63,24 @@ export const builtinBackgrounds: Record<BuiltinBackgroundKey, { label: string; s
   },
 }
 
+/**
+ * L'image d'un fond de la bibliothèque (ajouté par un administrateur, roue de réglages), comme
+ * `documentLibraryImageUrl` d'Eraser (une valeur nouvelle du modèle n'existe pas dans un Eraser
+ * plus ancien : l'adresse est recopiée ici). Elle ne change jamais.
+ */
+export function libraryBackgroundUrl(id: string) {
+  return `/api/documents/fonds/${encodeURIComponent(id)}/image`
+}
+
+/** Les mots-clés qui proposent un fond pour la couverture et pour l'image de fin (comme Eraser). */
+export const COVER_KEYWORD = "Couverture"
+export const END_KEYWORD = "Fin"
+
+/** Un mot-clé comparé sans majuscules ni accents. */
+export function keywordKey(value: string) {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLocaleLowerCase("fr")
+}
+
 export function plainParagraphs(content: string): DocumentParagraph[] {
   return content.split("\n").map((line) => line ? [{ text: line }] : [])
 }
