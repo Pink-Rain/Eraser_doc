@@ -33,13 +33,13 @@ type StudioData = {
   campaign: { id: string; name: string }
   documents: CampaignDocumentRecord[]
   sessions: Array<{ id: string; name: string }>
-  /** À qui donner un document : les joueurs, puis (Eraser alpha 291 et plus) les marchands (les magasins, pour l'y vendre) et les PNJ. */
+  /** À qui donner un document : les joueurs, puis (Eraser alpha 292 et plus) les marchands (les magasins, pour l'y vendre) et les PNJ. */
   players: DocumentRecipient[]
   merchants?: DocumentRecipient[]
   npcs?: DocumentRecipient[]
   /** Les modèles du compte, dans toutes ses campagnes (Eraser alpha 285 et plus). */
   templates?: CampaignDocumentRecord[]
-  /** La bibliothèque des fonds et les mots-clés des fonds fournis (Eraser alpha 291 et plus). */
+  /** La bibliothèque des fonds et les mots-clés des fonds fournis (Eraser alpha 292 et plus). */
   library?: BackgroundLibrary
   /** Ce que le serveur sait garder : `dossiers`, `modeles`, `calques`, `pages`… (absent avant l'alpha 285). */
   features?: string[]

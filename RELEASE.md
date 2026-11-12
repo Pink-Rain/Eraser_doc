@@ -1,6 +1,6 @@
 # Eraser Doc 0.3.0 — Plusieurs pages, couvertures, titres en or, fonds à soi
 
-Avec Eraser 0.1.1-alpha.291 ou plus récent :
+Avec Eraser 0.1.1-alpha.292 ou plus récent :
 
 - **Un document de plusieurs pages.** Une barre des pages, sous les outils, montre chaque page en
   vignette : un clic l'ouvre, les flèches (ou Page ↑ / Page ↓) passent à la précédente ou à la
