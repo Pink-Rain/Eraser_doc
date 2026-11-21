@@ -43,7 +43,20 @@ est décrit dans la section « Extensions » de l'`ARCHITECTURE.md` d'Eraser.
   renomme ses éléments et ses calques de dessin (`copiedContent`) : deux pages ne partagent
   jamais un calque. Un calque de dessin garde ses coups de plume en mémoire (annuler trait par
   trait) et part dans Drive comme une image à l'enregistrement (`piece-<nom>`) ; une image posée
-  aussi. Dossier et modèle s'enregistrent tout seuls (`PATCH`), sans redessiner.
+  aussi. Le dossier s'enregistre tout seul (`PATCH`), sans redessiner.
+- **Un modèle est un document à part** (`template`, rangé dans « Modèles ») : « Enregistrer comme
+  modèle » en fait une copie (`copiedDraft` puis `saveDraft`), le document d'origine reste un
+  document. Un document tiré d'un modèle (ou dupliqué) est une copie neuve : l'adresse passe à
+  `?nouveau=1` tant qu'elle n'est pas enregistrée (actualiser ne rouvre jamais l'original). Un
+  modèle ouvert le dit (bandeau) ; « Retirer des modèles » le rend document (`PATCH`).
+- **Une copie garde les identifiants de ses pages et de ses zones** : la scène est clée par le
+  document et par `generation` (chaque ouverture, reprise de brouillon), sinon elle garde le texte
+  du document d'avant et une retouche l'écrit dans celui qu'on ouvre.
+- **« Modifié »** (`signature`) : ni le dossier, ni le modèle, ni la hauteur des pages (elle suit le
+  fond), ni les pièces ou coups de plume d'éléments retirés (gardés pour Ctrl+Z). Un document neuf
+  ou copié non touché n'est pas modifié. Le brouillon de secours (`localStorage`) s'efface dès que
+  le document revient à l'état enregistré, quand il est supprimé, et à l'ouverture s'il n'apporte
+  rien ou que son document n'existe plus.
 - **Seuls les types viennent du modèle d'Eraser pour les nouveautés** : une valeur nouvelle du
   modèle (liste, fonction) n'existe pas dans un Eraser plus ancien, qui prête quand même l'ancien
   module. L'éditeur lit `features` (`?atelier=1`) et ne propose un outil que si Eraser sait le

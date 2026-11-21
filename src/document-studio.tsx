@@ -95,12 +95,24 @@ type Message = { tone: "ok" | "error"; text: string } | null
 const MAX_PAGES = 30
 
 const strokeCount = (paint: Record<string, Paint>) => Object.entries(paint).map(([id, layer]) => `${id}:${layer.strokes.length}`).sort()
-// Le dossier et le modèle s'enregistrent tout seuls (sans redessiner) : ils ne rendent pas le document « modifié ».
-const signature = (draft: Draft | null) => draft ? JSON.stringify({
-  title: draft.title, sessionId: draft.sessionId,
-  pages: draft.pages.map((page) => ({ id: page.id, background: page.background, content: page.content, upload: page.uploadFile ? `${page.uploadFile.size}:${page.uploadFile.type}` : "" })),
-  uploads: Object.keys(draft.uploads).sort(), paint: strokeCount(draft.paint),
-}) : ""
+/**
+ * Ce qui rend un document « modifié ». Le dossier et le modèle s'enregistrent tout seuls (sans
+ * redessiner) : ils n'en sont pas. La hauteur d'une page suit toujours son fond (elle se règle
+ * seule quand l'image est lue) : elle n'en est pas non plus. Seules comptent les pièces et les
+ * coups de plume des images et des calques encore posés : une image retirée (ou annulée) garde son
+ * fichier pour Ctrl+Z, mais ne laisse pas le document « modifié » après l'enregistrement.
+ */
+const signature = (draft: Draft | null) => {
+  if (!draft) return ""
+  const used = new Set(assetsOfPages(draft.pages))
+  const layers = new Set(draft.pages.flatMap((page) => page.content.pictures.map((picture) => picture.id)))
+  return JSON.stringify({
+    title: draft.title, sessionId: draft.sessionId,
+    pages: draft.pages.map((page) => ({ id: page.id, background: page.background, content: { ...page.content, height: 0 }, upload: page.uploadFile ? `${page.uploadFile.size}:${page.uploadFile.type}` : "" })),
+    uploads: Object.keys(draft.uploads).filter((asset) => used.has(asset)).sort(),
+    paint: strokeCount(Object.fromEntries(Object.entries(draft.paint).filter(([id]) => layers.has(id)))),
+  })
+}
 const assetsOf = (content: DocumentContent) => [...new Set((content.pictures ?? []).map((picture) => picture.asset))]
 /** Les pièces de toutes les pages. */
 const assetsOfPages = (pages: ReadonlyArray<{ content: DocumentContent }>) => [...new Set(pages.flatMap((page) => assetsOf(page.content)))]
@@ -148,8 +160,18 @@ function newDraftPage(background: DocumentBackground, file?: Blob | null): Draft
   return { id: crypto.randomUUID(), background, content, uploadFile: file ?? null, uploadPreview: file ? URL.createObjectURL(file) : "" }
 }
 
+function saveErrorText(error: unknown) {
+  return error instanceof DOMException && error.name === "SecurityError"
+    ? "Une image de fond ne peut pas être dessinée (son site la protège). Envoie-la plutôt depuis ton ordinateur."
+    : error instanceof Error ? error.message : "Le document n’a pas pu être enregistré."
+}
+
 /** Le choix « Nouveau dossier… » du menu des dossiers (un nom de dossier ne commence jamais par un espace). */
 const NEW_FOLDER = " nouveau"
+/** L'adresse d'un document pas encore enregistré (un identifiant ne commence jamais par un espace). */
+const NEW_DOCUMENT = " nouveau"
+/** Le dossier où se rangent les modèles enregistrés depuis un document. */
+const TEMPLATE_FOLDER = "Modèles"
 const backupKey = (campaignId: string) => `eraser-document-draft:${campaignId}`
 const toolsKey = "eraser-document-tools"
 
@@ -402,6 +424,9 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [contentKeys, setContentKeys] = useState<Record<string, number>>({})
+  // Chaque document ouvert (ou brouillon repris) a sa scène : une copie ou un modèle garde les
+  // identifiants de ses pages et de ses zones, et la scène d'avant y laissait son texte.
+  const [generation, setGeneration] = useState(0)
   const [history, setHistory] = useState<{ past: Snapshot[]; future: Snapshot[] }>({ past: [], future: [] })
   const [scale, setScale] = useState(0.6)
   const [showFrames, setShowFrames] = useState(true)
@@ -420,6 +445,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   const [emptyFolders, setEmptyFolders] = useState<string[]>([])
   const [newFolderFor, setNewFolderFor] = useState<string | null>(null)
   const [copying, setCopying] = useState(false)
+  const [makingTemplate, setMakingTemplate] = useState(false)
   const [addingPage, setAddingPage] = useState(false)
   // La couverture ou l'image de fin qu'on est en train d'ajouter (son choix de fond est ouvert).
   const [addingRole, setAddingRole] = useState<DocumentPageRole | null>(null)
@@ -448,16 +474,42 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
     try { window.localStorage.setItem(toolsKey, JSON.stringify(tools)) } catch { /* stockage plein */ }
   }, [tools])
 
-  // Un brouillon non enregistré (application fermée, page quittée) : proposé à la réouverture.
+  // Un brouillon non enregistré (application fermée, page quittée) : proposé à la réouverture,
+  // sauf s'il n'apporte rien (identique au document enregistré) ou que son document a été supprimé.
+  // Le document du brouillon écrit pendant cette séance (celui trouvé à l'ouverture reste proposé
+  // tant qu'on ne le reprend pas, ne l'oublie pas, ou n'en écrit pas un autre).
+  const backupId = useRef<string | null>(null)
   useEffect(() => {
     const found = readBackup(campaignId)
-    if (found) queueMicrotask(() => setBackup(found))
+    if (!found) return
+    const original = initialDocuments.find((document) => document.id === found.id)
+    const useless = original ? signature({ ...found, uploads: {} }) === signature(draftOf(original)) : !found.isNew
+    if (useless) {
+      try { window.localStorage.removeItem(backupKey(campaignId)) } catch { /* rien à effacer */ }
+      return
+    }
+    queueMicrotask(() => {
+      setBackup(found)
+      // Rouvert sur un document pas encore enregistré (`?nouveau=1`) : son brouillon d'abord, pas le choix d'un fond.
+      if (found.isNew) setChoosing(false)
+    })
+    // Lu une fois, à l'ouverture : les documents de la page viennent de la même lecture.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [campaignId])
   useEffect(() => {
-    if (!draft || !dirty) return
+    if (!draft) return
+    if (!dirty) {
+      // Revenu à l'état enregistré (enregistré, Ctrl+Z, retouche défaite) : son brouillon n'a plus lieu d'être.
+      if (backupId.current === draft.id) {
+        backupId.current = null
+        try { window.localStorage.removeItem(backupKey(campaignId)) } catch { /* rien à effacer */ }
+      }
+      return
+    }
     const timer = window.setTimeout(() => {
       try {
         window.localStorage.setItem(backupKey(campaignId), JSON.stringify({ ...draft, pages: draft.pages.map((page) => ({ ...page, uploadFile: null, uploadPreview: "" })), uploads: {}, previews: {}, savedAt: new Date().toISOString() }))
+        backupId.current = draft.id
       } catch { /* stockage plein : le brouillon n'est pas gardé */ }
     }, 800)
     return () => window.clearTimeout(timer)
@@ -471,10 +523,13 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
     return () => document.removeEventListener("selectionchange", update)
   }, [editingId])
 
-  // L'adresse de la page suit le document ouvert : « Actualiser » y revient.
-  const openedId = draft && !draft.isNew ? draft.id : ""
+  // L'adresse de la page suit le document ouvert : « Actualiser » y revient. Un document pas encore
+  // enregistré (nouveau, copie, tiré d'un modèle) n'y laisse pas celui d'avant : actualiser
+  // rouvrirait l'original, et on continuerait d'écrire dedans en croyant écrire dans la copie.
+  const openedId = draft ? draft.isNew ? NEW_DOCUMENT : draft.id : ""
   useEffect(() => {
-    if (openedId) replaceAppUrl(documentStudioHref(campaignId, { document: openedId }))
+    if (openedId === NEW_DOCUMENT) replaceAppUrl(documentStudioHref(campaignId, { nouveau: true }))
+    else if (openedId) replaceAppUrl(documentStudioHref(campaignId, { document: openedId }))
   }, [campaignId, openedId])
 
   /* ----- modifier, avec annuler ----- */
@@ -836,6 +891,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
 
   function resetEditing() {
     setSelectedId(null); setEditingId(null); setHistory({ past: [], future: [] }); setOverflowing({}); setMessage(null); setTool("select")
+    setGeneration((current) => current + 1)
     setContentKeys((keys) => Object.fromEntries(Object.entries(keys).map(([id, value]) => [id, value + 1])))
   }
 
@@ -860,18 +916,18 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
     releasePreviews(draft)
     resetEditing()
     setDraft(next)
-    setSavedSignature("")
+    // Pas encore touché : le quitter ne demande rien et ne laisse pas de brouillon.
+    setSavedSignature(signature(next))
     setChoosing(false)
   }
 
   /**
-   * Un nouveau document copié d'un autre (dupliquer) ou d'un modèle : ses pages, et leurs images
-   * (fonds importés, images posées, calques de dessin) relues chez Eraser pour être renvoyées avec
-   * la copie. La copie attend d'être enregistrée.
+   * Un nouveau document copié d'un autre (dupliquer, modèle) : ses pages, et leurs images (fonds
+   * importés, images posées, calques de dessin) relues chez Eraser pour être renvoyées avec la
+   * copie. Les éléments et les pages gardent leurs noms, mais le document en a un neuf. Lève une
+   * erreur si une image n'a pas pu être relue (ses aperçus sont alors libérés).
    */
-  async function copyOf(source: CampaignDocumentRecord, title: string, folder: string) {
-    setCopying(true)
-    setMessage(null)
+  async function copiedDraft(source: CampaignDocumentRecord, place: { title: string; folder: string; sessionId: string; template: boolean }): Promise<Draft> {
     const made: string[] = []
     const blobOf = async (url: string) => {
       const response = await fetch(url)
@@ -898,20 +954,33 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
         made.push(uploadPreview)
         pages.push({ ...sourcePage, uploadFile, uploadPreview })
       }
-      // Les éléments et les pages gardent leurs noms, mais le document en a un neuf.
-      const next: Draft = {
-        id: crypto.randomUUID(), isNew: true, title: title.slice(0, 160), sessionId: startingSession, folder, template: false,
+      return {
+        id: crypto.randomUUID(), isNew: true, title: place.title.slice(0, 160), sessionId: place.sessionId, folder: place.folder, template: place.template,
         pages, page: 0, savedFonds: {}, uploads, previews, remote: [], paint: {},
         renderVersion: "", updatedAt: "",
       }
+    } catch (error) {
+      for (const url of made) URL.revokeObjectURL(url)
+      throw error
+    }
+  }
+
+  /** Ouvre une copie d'un document (dupliquer) ou d'un modèle : elle attend d'être enregistrée. */
+  async function copyOf(source: CampaignDocumentRecord, place: { title: string; folder: string; sessionId: string }) {
+    setCopying(true)
+    setMessage(null)
+    try {
+      const next = await copiedDraft(source, { ...place, template: false })
       releasePreviews(draft)
       resetEditing()
       setDraft(next)
-      setSavedSignature("")
+      // Pas encore touchée : la quitter ne demande rien (le modèle ou l'original sont toujours là).
+      setSavedSignature(signature(next))
       setChoosing(false)
-      setMessage({ tone: "ok", text: "Copie prête : renomme-la si besoin, puis enregistre-la." })
+      setMessage({ tone: "ok", text: source.template
+        ? `Nouveau document tiré du modèle « ${source.title} » : le modèle ne change pas. Renomme-le si besoin, puis enregistre-le.`
+        : "Copie prête : renomme-la si besoin, puis enregistre-la. L’original ne change pas." })
     } catch {
-      for (const url of made) URL.revokeObjectURL(url)
       setMessage({ tone: "error", text: "La copie n’a pas pu être faite : une image du document n’a pas pu être relue. Réessaie dans un instant." })
     } finally {
       setCopying(false)
@@ -921,11 +990,11 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   function duplicateDocument() {
     const source = draft && documents.find((document) => document.id === draft.id)
     if (!source) return
-    void copyOf(source, `${source.title} (copie)`, source.folder ?? "")
+    void copyOf(source, { title: `${source.title} (copie)`, folder: source.folder ?? "", sessionId: source.sessionId })
   }
 
   function fromTemplate(template: CampaignDocumentRecord) {
-    guard(() => { void copyOf(template, template.title, "") })
+    guard(() => { void copyOf(template, { title: template.title, folder: "", sessionId: startingSession }) })
   }
 
   /** Le fond de la page ouverte : les autres pages gardent le leur (annuler y revient). */
@@ -1091,7 +1160,15 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
   }
   function dropBackup() {
     try { window.localStorage.removeItem(backupKey(campaignId)) } catch { /* rien à effacer */ }
+    backupId.current = null
     setBackup(null)
+  }
+  /** Le brouillon d'un document supprimé ou abandonné : il ne reviendra pas. */
+  function forgetBackupOf(id: string) {
+    if (backupId.current !== id && backup?.id !== id) return
+    try { window.localStorage.removeItem(backupKey(campaignId)) } catch { /* rien à effacer */ }
+    backupId.current = null
+    if (backup?.id === id) setBackup(null)
   }
 
   /* ----- dossiers et modèles ----- */
@@ -1141,176 +1218,208 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
 
   const backgroundSrc = draft && page ? pageBackgroundSrc(campaignId, draft, page) : ""
 
+  /**
+   * Enregistre un brouillon (celui qui est ouvert, ou un autre : le modèle tiré d'un document) :
+   * dessine chaque page, envoie le tout à Eraser et rend ce qu'Eraser a gardé (`stored`) et le
+   * brouillon tel qu'enregistré (`kept`). Ne touche à l'éditeur que si ce brouillon y est ouvert.
+   */
+  async function saveDraft(start: Draft, onUpload?: () => void): Promise<{ stored: CampaignDocumentRecord; kept: Draft }> {
+    let snapshot = start
+    // Le fond de chaque page, lu une fois : pour le dessin, et pour la hauteur d'une page jamais ouverte.
+    const images = await Promise.all(snapshot.pages.map(async (candidate) => {
+      const src = pageBackgroundSrc(campaignId, snapshot, candidate)
+      return src ? loadImage(src) : null
+    }))
+    const heights = images.map((image) => image ? heightOf(image.naturalWidth || image.width, image.naturalHeight || image.height) : 0)
+    if (snapshot.pages.some((candidate, index) => heights[index] && Math.abs(heights[index] - candidate.content.height) > 0.5)) {
+      const fixed = new Map(snapshot.pages.flatMap((candidate, index) => heights[index] && Math.abs(heights[index] - candidate.content.height) > 0.5 ? [[candidate.id, heights[index]] as const] : []))
+      const fix = (candidate: DraftPage) => fixed.has(candidate.id) ? { ...candidate, content: { ...candidate.content, height: fixed.get(candidate.id)! } } : candidate
+      snapshot = { ...snapshot, pages: snapshot.pages.map(fix) }
+      setDraft((current) => current && current.id === snapshot.id ? { ...current, pages: current.pages.map(fix) } : current)
+    }
+    const [first, ...rest] = snapshot.pages
+    const documentJson = JSON.stringify({
+      id: snapshot.id, title: snapshot.title, sessionId: snapshot.sessionId, background: first.background, content: first.content,
+      // Les pages suivantes ne partent que vers un Eraser qui les garde.
+      ...(pagesOn ? { pages: rest.map((candidate) => ({ id: candidate.id, background: candidate.background, content: candidate.content })) } : {}),
+      folder: snapshot.folder, template: snapshot.template,
+    })
+    // Chaque image tient dans un envoi (Eraser refuse plus de 1 Mo par envoi : document-upload.ts).
+    // Un seul envoi quand Eraser l'accepte ; sinon, des envois de 1 Mo au plus.
+    const requestLimit = features.includes("envoi-unique") ? LARGE_REQUESTS : SMALL_REQUESTS
+    const budget = partBudget(documentJson, requestLimit)
+    // Les images importées restent légères (l'éditeur les relit à chaque ouverture).
+    const imageBudget = Math.min(budget, 4 * 1024 * 1024)
+
+    // Le fond importé d'une page part s'il est nouveau, ou si la page a changé de place (Eraser
+    // range à part celui de la première page) ; sinon, Eraser l'a déjà.
+    const fonds: Array<{ index: number; pageId: string; file: Blob }> = []
+    for (const [index, candidate] of snapshot.pages.entries()) {
+      if (candidate.background.kind !== "upload") continue
+      if (!candidate.uploadFile && snapshot.savedFonds[candidate.id] === fondPart(index, candidate.id)) continue
+      const file = await uploadedBackground(snapshot, candidate)
+      if (!file) throw new Error(`Le fond importé de la page ${index + 1} n’a pas pu être relu : choisis-le de nouveau (bouton Fond).`)
+      fonds.push({ index, pageId: candidate.id, file })
+    }
+    // Tous les fonds tiennent ensemble dans le premier envoi : Eraser veut celui de chaque page avec elle.
+    const fondBudget = Math.max(64 * 1024, Math.min(imageBudget, Math.floor((budget - 64 * 1024) / Math.max(1, fonds.length))))
+
+    // Les calques de dessin touchés (ou pas encore chez Eraser) sont aplatis en une image.
+    const uploads = { ...snapshot.uploads }
+    const previews = { ...snapshot.previews }
+    const flattened: Record<string, number> = {}
+    for (const picture of snapshot.pages.flatMap((candidate) => candidate.content.pictures)) {
+      if (picture.kind !== "drawing") continue
+      const layer = snapshot.paint[picture.id]
+      const touched = Boolean(layer?.strokes.length)
+      if (!touched && (snapshot.remote.includes(picture.asset) || uploads[picture.asset])) continue
+      const src = previews[picture.asset] || (snapshot.remote.includes(picture.asset) && !snapshot.isNew ? pieceUrl(campaignId, snapshot.id, picture.asset, snapshot.updatedAt) : "")
+      const base = src ? await loadImage(src).catch(() => null) : null
+      const canvas = flattenDrawing(base, layer ?? { width: base?.naturalWidth || picture.width * DRAWING_SCALE, height: base?.naturalHeight || picture.height * DRAWING_SCALE, strokes: [] })
+      const blob = await fittedBlob(canvas, "image/webp", [0.92, 0.85, 0.75], imageBudget)
+      uploads[picture.asset] = blob
+      if (previews[picture.asset]?.startsWith("blob:")) URL.revokeObjectURL(previews[picture.asset])
+      previews[picture.asset] = URL.createObjectURL(blob)
+      flattened[picture.id] = layer?.strokes.length ?? 0
+    }
+    if (Object.keys(flattened).length) {
+      // Les coups aplatis sont dans l'image : annuler ne peut plus les retirer un à un.
+      setDraft((current) => current && current.id === snapshot.id ? {
+        ...current, uploads: { ...current.uploads, ...Object.fromEntries(Object.keys(uploads).filter((asset) => !snapshot.uploads[asset]).map((asset) => [asset, uploads[asset]])) },
+        previews: { ...current.previews, ...previews },
+        paint: Object.fromEntries(Object.entries(current.paint).flatMap(([id, layer]) => flattened[id] === undefined ? [[id, layer]] : layer.strokes.length > flattened[id] ? [[id, { ...layer, strokes: layer.strokes.slice(flattened[id]) }]] : [])),
+      } : current)
+      setHistory({ past: [], future: [] })
+    }
+
+    // Les images des pièces, pour le rendu.
+    const assets = assetsOfPages(snapshot.pages)
+    const pictures = new Map<string, HTMLImageElement>()
+    for (const asset of assets) {
+      const src = previews[asset] || (snapshot.remote.includes(asset) && !snapshot.isNew ? pieceUrl(campaignId, snapshot.id, asset, snapshot.updatedAt) : "")
+      const loaded = src ? await loadImage(src).catch(() => null) : null
+      if (loaded) pictures.set(asset, loaded)
+    }
+    // Chaque page dessinée : son rendu (lu par les joueurs et Roll20) et son impression (le PDF).
+    const drawn: DocumentPart[] = []
+    for (const [index, candidate] of snapshot.pages.entries()) {
+      const number = index + 1
+      const render = await fittedBlob(await renderDocumentCanvas(candidate.content, images[index], DOCUMENT_RENDER_WIDTH, "", pictures), "image/webp", [0.9, 0.8, 0.7], budget)
+      const print = await fittedBlob(await renderDocumentCanvas(candidate.content, images[index], DOCUMENT_RENDER_WIDTH, "#ffffff", pictures), "image/jpeg", [0.9, 0.8, 0.7], budget)
+      drawn.push(
+        { field: number > 1 ? `render-${number}` : "render", file: new File([render], render.type === "image/webp" ? `rendu-${number}.webp` : `rendu-${number}.png`, { type: render.type }) },
+        { field: number > 1 ? `print-${number}` : "print", file: new File([print], `impression-${number}.jpg`, { type: "image/jpeg" }) },
+      )
+    }
+    const backgrounds: DocumentPart[] = []
+    for (const fond of fonds) {
+      const file = fond.file instanceof File ? fond.file : new File([fond.file], "fond", { type: fond.file.type || "image/webp" })
+      backgrounds.push({ field: fond.index ? `background-${fond.pageId}` : "background", file: await fittedBackground(file, fondBudget) })
+    }
+    const pieces: DocumentPart[] = []
+    for (const asset of assets) {
+      // Seules les pièces nouvelles ou redessinées partent ; les autres sont déjà chez Eraser.
+      const pending = uploads[asset]
+      if (!pending) continue
+      const file = pending instanceof File ? pending : new File([pending], `${asset}.webp`, { type: pending.type || "image/webp" })
+      pieces.push({ field: `piece-${asset}`, file: await fittedBackground(file, imageBudget, /^image\/(webp|png|jpeg|gif)$/) })
+    }
+    onUpload?.()
+    const parts: DocumentPart[] = [...backgrounds, ...pieces, ...drawn]
+    // Eraser a les pages telles qu'envoyées : il range désormais le fond importé de chacune à sa place.
+    const savedFonds = savedFondsOf(snapshot.pages)
+    let stored: CampaignDocumentRecord | null = null
+    const sentFonds = new Set<string>()
+    const sent = new Set<string>()
+    for (const form of await documentForms(documentJson, parts, requestLimit)) {
+      const response = await fetch(`/api/campaigns/${encodeURIComponent(campaignId)}/documents`, { method: "POST", body: form })
+      const payload = (await response.json().catch(() => ({}))) as { document?: CampaignDocumentRecord; error?: string }
+      if (!response.ok || !payload.document) {
+        throw new Error(payload.error || (response.status === 413
+          ? "Le document est trop lourd pour être envoyé à Eraser : allège l’image de fond, puis réessaie."
+          : `Le document n’a pas pu être enregistré (réponse ${response.status} d’Eraser). Réessaie dans un instant.`))
+      }
+      const saved = payload.document
+      stored = saved
+      for (const name of form.keys()) {
+        if (name.startsWith("piece-")) sent.add(name.slice(6))
+        else if (name === "background") sentFonds.add(first.id)
+        else if (name.startsWith("background-")) sentFonds.add(name.slice(11))
+      }
+      const arrived = [...sent]
+      const fondsArrived = new Set(sentFonds)
+      // Chaque envoi réussi est gardé : si le suivant échoue, le document existe déjà (et ses images aussi).
+      setDocuments((current) => current.some((document) => document.id === saved.id) ? current.map((document) => document.id === saved.id ? saved : document) : [...current, saved])
+      setDraft((current) => current && current.id === saved.id ? {
+        ...current, isNew: false, savedFonds,
+        // Un fond arrivé chez Eraser n'est plus à envoyer (sauf s'il a changé entre-temps).
+        pages: current.pages.map((candidate) => fondsArrived.has(candidate.id) && candidate.uploadFile && candidate.uploadFile === snapshot.pages.find((one) => one.id === candidate.id)?.uploadFile ? { ...candidate, uploadFile: null } : candidate),
+        uploads: Object.fromEntries(Object.entries(current.uploads).filter(([asset, blob]) => !arrived.includes(asset) || blob !== uploads[asset])),
+        remote: [...new Set([...current.remote, ...arrived])],
+        renderVersion: saved.renderVersion, updatedAt: saved.updatedAt,
+      } : current)
+    }
+    if (!stored) throw new Error("Le document n’a pas pu être enregistré.")
+    if (stored.template) setTemplates((current) => [...current.filter((template) => template.id !== stored.id), stored].sort((left, right) => left.title.localeCompare(right.title, "fr")))
+    const kept: Draft = {
+      ...snapshot, isNew: false, savedFonds, uploads: {}, remote: [...new Set([...snapshot.remote, ...sent])],
+      pages: snapshot.pages.map((candidate) => sentFonds.has(candidate.id) ? { ...candidate, uploadFile: null } : candidate),
+      paint: Object.fromEntries(Object.entries(snapshot.paint).filter(([id]) => flattened[id] === undefined)),
+      renderVersion: stored.renderVersion, updatedAt: stored.updatedAt,
+    }
+    return { stored, kept }
+  }
+
   async function save() {
     if (!draft || saving) return
-    let snapshot = draft
     setSaving("render"); setMessage(null)
     try {
-      // Le fond de chaque page, lu une fois : pour le dessin, et pour la hauteur d'une page jamais ouverte.
-      const images = await Promise.all(snapshot.pages.map(async (candidate) => {
-        const src = pageBackgroundSrc(campaignId, snapshot, candidate)
-        return src ? loadImage(src) : null
-      }))
-      const heights = images.map((image) => image ? heightOf(image.naturalWidth || image.width, image.naturalHeight || image.height) : 0)
-      if (snapshot.pages.some((candidate, index) => heights[index] && Math.abs(heights[index] - candidate.content.height) > 0.5)) {
-        const fixed = new Map(snapshot.pages.flatMap((candidate, index) => heights[index] && Math.abs(heights[index] - candidate.content.height) > 0.5 ? [[candidate.id, heights[index]] as const] : []))
-        const fix = (candidate: DraftPage) => fixed.has(candidate.id) ? { ...candidate, content: { ...candidate.content, height: fixed.get(candidate.id)! } } : candidate
-        snapshot = { ...snapshot, pages: snapshot.pages.map(fix) }
-        setDraft((current) => current && current.id === snapshot.id ? { ...current, pages: current.pages.map(fix) } : current)
-      }
-      const [first, ...rest] = snapshot.pages
-      const documentJson = JSON.stringify({
-        id: snapshot.id, title: snapshot.title, sessionId: snapshot.sessionId, background: first.background, content: first.content,
-        // Les pages suivantes ne partent que vers un Eraser qui les garde.
-        ...(pagesOn ? { pages: rest.map((candidate) => ({ id: candidate.id, background: candidate.background, content: candidate.content })) } : {}),
-        folder: snapshot.folder, template: snapshot.template,
-      })
-      // Chaque image tient dans un envoi (Eraser refuse plus de 1 Mo par envoi : document-upload.ts).
-      // Un seul envoi quand Eraser l'accepte ; sinon, des envois de 1 Mo au plus.
-      const requestLimit = features.includes("envoi-unique") ? LARGE_REQUESTS : SMALL_REQUESTS
-      const budget = partBudget(documentJson, requestLimit)
-      // Les images importées restent légères (l'éditeur les relit à chaque ouverture).
-      const imageBudget = Math.min(budget, 4 * 1024 * 1024)
-
-      // Le fond importé d'une page part s'il est nouveau, ou si la page a changé de place (Eraser
-      // range à part celui de la première page) ; sinon, Eraser l'a déjà.
-      const fonds: Array<{ index: number; pageId: string; file: Blob }> = []
-      for (const [index, candidate] of snapshot.pages.entries()) {
-        if (candidate.background.kind !== "upload") continue
-        if (!candidate.uploadFile && snapshot.savedFonds[candidate.id] === fondPart(index, candidate.id)) continue
-        const file = await uploadedBackground(snapshot, candidate)
-        if (!file) throw new Error(`Le fond importé de la page ${index + 1} n’a pas pu être relu : choisis-le de nouveau (bouton Fond).`)
-        fonds.push({ index, pageId: candidate.id, file })
-      }
-      // Tous les fonds tiennent ensemble dans le premier envoi : Eraser veut celui de chaque page avec elle.
-      const fondBudget = Math.max(64 * 1024, Math.min(imageBudget, Math.floor((budget - 64 * 1024) / Math.max(1, fonds.length))))
-
-      // Les calques de dessin touchés (ou pas encore chez Eraser) sont aplatis en une image.
-      const uploads = { ...snapshot.uploads }
-      const previews = { ...snapshot.previews }
-      const flattened: Record<string, number> = {}
-      for (const picture of snapshot.pages.flatMap((candidate) => candidate.content.pictures)) {
-        if (picture.kind !== "drawing") continue
-        const layer = snapshot.paint[picture.id]
-        const touched = Boolean(layer?.strokes.length)
-        if (!touched && (snapshot.remote.includes(picture.asset) || uploads[picture.asset])) continue
-        const src = previews[picture.asset] || (snapshot.remote.includes(picture.asset) && !snapshot.isNew ? pieceUrl(campaignId, snapshot.id, picture.asset, snapshot.updatedAt) : "")
-        const base = src ? await loadImage(src).catch(() => null) : null
-        const canvas = flattenDrawing(base, layer ?? { width: base?.naturalWidth || picture.width * DRAWING_SCALE, height: base?.naturalHeight || picture.height * DRAWING_SCALE, strokes: [] })
-        const blob = await fittedBlob(canvas, "image/webp", [0.92, 0.85, 0.75], imageBudget)
-        uploads[picture.asset] = blob
-        if (previews[picture.asset]?.startsWith("blob:")) URL.revokeObjectURL(previews[picture.asset])
-        previews[picture.asset] = URL.createObjectURL(blob)
-        flattened[picture.id] = layer?.strokes.length ?? 0
-      }
-      if (Object.keys(flattened).length) {
-        // Les coups aplatis sont dans l'image : annuler ne peut plus les retirer un à un.
-        setDraft((current) => current && current.id === snapshot.id ? {
-          ...current, uploads: { ...current.uploads, ...Object.fromEntries(Object.keys(uploads).filter((asset) => !snapshot.uploads[asset]).map((asset) => [asset, uploads[asset]])) },
-          previews: { ...current.previews, ...previews },
-          paint: Object.fromEntries(Object.entries(current.paint).flatMap(([id, layer]) => flattened[id] === undefined ? [[id, layer]] : layer.strokes.length > flattened[id] ? [[id, { ...layer, strokes: layer.strokes.slice(flattened[id]) }]] : [])),
-        } : current)
-        setHistory({ past: [], future: [] })
-      }
-
-      // Les images des pièces, pour le rendu.
-      const assets = assetsOfPages(snapshot.pages)
-      const pictures = new Map<string, HTMLImageElement>()
-      for (const asset of assets) {
-        const src = previews[asset] || (snapshot.remote.includes(asset) && !snapshot.isNew ? pieceUrl(campaignId, snapshot.id, asset, snapshot.updatedAt) : "")
-        const loaded = src ? await loadImage(src).catch(() => null) : null
-        if (loaded) pictures.set(asset, loaded)
-      }
-      // Chaque page dessinée : son rendu (lu par les joueurs et Roll20) et son impression (le PDF).
-      const drawn: DocumentPart[] = []
-      for (const [index, candidate] of snapshot.pages.entries()) {
-        const number = index + 1
-        const render = await fittedBlob(await renderDocumentCanvas(candidate.content, images[index], DOCUMENT_RENDER_WIDTH, "", pictures), "image/webp", [0.9, 0.8, 0.7], budget)
-        const print = await fittedBlob(await renderDocumentCanvas(candidate.content, images[index], DOCUMENT_RENDER_WIDTH, "#ffffff", pictures), "image/jpeg", [0.9, 0.8, 0.7], budget)
-        drawn.push(
-          { field: number > 1 ? `render-${number}` : "render", file: new File([render], render.type === "image/webp" ? `rendu-${number}.webp` : `rendu-${number}.png`, { type: render.type }) },
-          { field: number > 1 ? `print-${number}` : "print", file: new File([print], `impression-${number}.jpg`, { type: "image/jpeg" }) },
-        )
-      }
-      const backgrounds: DocumentPart[] = []
-      for (const fond of fonds) {
-        const file = fond.file instanceof File ? fond.file : new File([fond.file], "fond", { type: fond.file.type || "image/webp" })
-        backgrounds.push({ field: fond.index ? `background-${fond.pageId}` : "background", file: await fittedBackground(file, fondBudget) })
-      }
-      const pieces: DocumentPart[] = []
-      for (const asset of assets) {
-        // Seules les pièces nouvelles ou redessinées partent ; les autres sont déjà chez Eraser.
-        const pending = uploads[asset]
-        if (!pending) continue
-        const file = pending instanceof File ? pending : new File([pending], `${asset}.webp`, { type: pending.type || "image/webp" })
-        pieces.push({ field: `piece-${asset}`, file: await fittedBackground(file, imageBudget, /^image\/(webp|png|jpeg|gif)$/) })
-      }
-      setSaving("upload")
-      const parts: DocumentPart[] = [...backgrounds, ...pieces, ...drawn]
-      // Eraser a les pages telles qu'envoyées : il range désormais le fond importé de chacune à sa place.
-      const savedFonds = savedFondsOf(snapshot.pages)
-      let stored: CampaignDocumentRecord | null = null
-      const sentFonds = new Set<string>()
-      const sent = new Set<string>()
-      for (const form of await documentForms(documentJson, parts, requestLimit)) {
-        const response = await fetch(`/api/campaigns/${encodeURIComponent(campaignId)}/documents`, { method: "POST", body: form })
-        const payload = (await response.json().catch(() => ({}))) as { document?: CampaignDocumentRecord; error?: string }
-        if (!response.ok || !payload.document) {
-          throw new Error(payload.error || (response.status === 413
-            ? "Le document est trop lourd pour être envoyé à Eraser : allège l’image de fond, puis réessaie."
-            : `Le document n’a pas pu être enregistré (réponse ${response.status} d’Eraser). Réessaie dans un instant.`))
-        }
-        const saved = payload.document
-        stored = saved
-        for (const name of form.keys()) {
-          if (name.startsWith("piece-")) sent.add(name.slice(6))
-          else if (name === "background") sentFonds.add(first.id)
-          else if (name.startsWith("background-")) sentFonds.add(name.slice(11))
-        }
-        const arrived = [...sent]
-        const fondsArrived = new Set(sentFonds)
-        // Chaque envoi réussi est gardé : si le suivant échoue, le document existe déjà (et ses images aussi).
-        setDocuments((current) => current.some((document) => document.id === saved.id) ? current.map((document) => document.id === saved.id ? saved : document) : [...current, saved])
-        setDraft((current) => current && current.id === saved.id ? {
-          ...current, isNew: false, savedFonds,
-          // Un fond arrivé chez Eraser n'est plus à envoyer (sauf s'il a changé entre-temps).
-          pages: current.pages.map((candidate) => fondsArrived.has(candidate.id) && candidate.uploadFile && candidate.uploadFile === snapshot.pages.find((one) => one.id === candidate.id)?.uploadFile ? { ...candidate, uploadFile: null } : candidate),
-          uploads: Object.fromEntries(Object.entries(current.uploads).filter(([asset, blob]) => !arrived.includes(asset) || blob !== uploads[asset])),
-          remote: [...new Set([...current.remote, ...arrived])],
-          renderVersion: saved.renderVersion, updatedAt: saved.updatedAt,
-        } : current)
-      }
-      if (!stored) throw new Error("Le document n’a pas pu être enregistré.")
-      if (stored.template) setTemplates((current) => [...current.filter((template) => template.id !== stored.id), stored].sort((left, right) => left.title.localeCompare(right.title, "fr")))
-      const kept: Draft = {
-        ...snapshot, isNew: false, savedFonds, uploads: {}, remote: [...new Set([...snapshot.remote, ...sent])],
-        pages: snapshot.pages.map((candidate) => sentFonds.has(candidate.id) ? { ...candidate, uploadFile: null } : candidate),
-        paint: Object.fromEntries(Object.entries(snapshot.paint).filter(([id]) => flattened[id] === undefined)),
-        renderVersion: stored.renderVersion, updatedAt: stored.updatedAt,
-      }
+      const { kept } = await saveDraft(draft, () => setSaving("upload"))
       setSavedSignature(signature(kept))
+      backupId.current = null
       try { window.localStorage.removeItem(backupKey(campaignId)) } catch { /* rien à effacer */ }
-      setMessage({ tone: "ok", text: snapshot.pages.length > 1
-        ? `Document enregistré (${snapshot.pages.length} pages) : prêt à être donné et à partir dans Roll20.`
+      setMessage({ tone: "ok", text: kept.pages.length > 1
+        ? `Document enregistré (${kept.pages.length} pages) : prêt à être donné et à partir dans Roll20.`
         : "Document enregistré : prêt à être donné et à partir dans Roll20." })
     } catch (error) {
-      const text = error instanceof DOMException && error.name === "SecurityError"
-        ? "Une image de fond ne peut pas être dessinée (son site la protège). Envoie-la plutôt depuis ton ordinateur."
-        : error instanceof Error ? error.message : "Le document n’a pas pu être enregistré."
-      setMessage({ tone: "error", text })
+      setMessage({ tone: "error", text: saveErrorText(error) })
     } finally {
       setSaving("")
     }
   }
 
+  /**
+   * « Enregistrer comme modèle » : un modèle à part, copie du document tel qu'enregistré (rangé
+   * dans « Modèles »). Le document reste un document : le changer ne change pas le modèle, et
+   * les documents tirés du modèle ne changent ni l'un ni l'autre.
+   */
+  async function saveAsTemplate() {
+    const source = draft && !draft.isNew ? documents.find((document) => document.id === draft.id) : undefined
+    if (!source || dirty || makingTemplate) return
+    setMakingTemplate(true)
+    setMessage(null)
+    let copy: Draft | null = null
+    try {
+      copy = await copiedDraft(source, { title: source.title, folder: foldersOn ? TEMPLATE_FOLDER : "", sessionId: "", template: true })
+      const { stored } = await saveDraft(copy)
+      setMessage({ tone: "ok", text: `Modèle « ${stored.title} » enregistré${foldersOn ? " (dossier « Modèles »)" : ""} : il est proposé dans « Nouveau document », dans toutes tes campagnes. Ce document reste tel quel, et le changer ne change pas le modèle.` })
+    } catch (error) {
+      setMessage({ tone: "error", text: error instanceof Error && error.message === "COPY_IMAGE_MISSING" ? "Le modèle n’a pas pu être fait : une image du document n’a pas pu être relue. Réessaie dans un instant." : saveErrorText(error) })
+    } finally {
+      if (copy) for (const url of [...copy.pages.map((candidate) => candidate.uploadPreview), ...Object.values(copy.previews)]) if (url.startsWith("blob:")) URL.revokeObjectURL(url)
+      setMakingTemplate(false)
+    }
+  }
+
   async function remove() {
     if (!draft) return
-    if (draft.isNew) { releasePreviews(draft); setDraft(null); setSavedSignature(""); setDeleting(false); return }
+    if (draft.isNew) { forgetBackupOf(draft.id); releasePreviews(draft); setDraft(null); setSavedSignature(""); setDeleting(false); return }
     try {
       const response = await fetch(`/api/campaigns/${encodeURIComponent(campaignId)}/documents/${encodeURIComponent(draft.id)}`, { method: "DELETE" })
       if (!response.ok) throw new Error("DELETE_FAILED")
       setDocuments((current) => current.filter((document) => document.id !== draft.id))
       setTemplates((current) => current.filter((template) => template.id !== draft.id))
+      forgetBackupOf(draft.id)
       releasePreviews(draft)
       setDraft(null)
       setSavedSignature("")
@@ -1599,6 +1708,11 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
         </div>
 
         {!layersOn && <p className={cn(hintText, "px-1")}>Lignes, formes, images, dessin et modes de fusion arrivent avec la prochaine version d’Eraser : « Chercher les mises à jour » dans la barre latérale.</p>}
+        {templatesOn && draft.template && !draft.isNew && <div className="flex flex-wrap items-center gap-3 rounded-xl border border-primary/30 bg-primary/6 px-4 py-2.5 text-sm">
+          <LayoutTemplate className="size-4 shrink-0 text-primary" />
+          <span className="min-w-0 flex-1"><b>C’est un modèle.</b> Ce que tu y changes change le modèle (pas les documents déjà écrits à partir de lui).</span>
+          {saved && <Button type="button" size="sm" disabled={copying} onClick={() => fromTemplate(saved)}>{copying ? <LoaderCircle className="animate-spin" /> : <FilePlus2 />}Écrire un document à partir de ce modèle</Button>}
+        </div>}
         {message && <p className={cn("rounded-xl border px-4 py-2.5 text-sm", message.tone === "ok" ? "border-emerald-600/25 bg-emerald-600/8 text-emerald-800 dark:text-emerald-300" : "border-destructive/25 bg-destructive/5 text-destructive")}>{message.text}</p>}
         {anyOverflow && <p className="flex items-center gap-2 text-xs text-amber-700 dark:text-amber-400"><TriangleAlert className="size-3.5" />Le texte dépasse de sa zone : agrandis-la ou réduis la taille du texte.</p>}
 
@@ -1656,8 +1770,8 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
         <div className="rounded-2xl border bg-[repeating-conic-gradient(rgb(0_0_0/0.035)_0_25%,transparent_0_50%)] bg-[length:22px_22px] p-3 sm:p-5">
           <div className="mx-auto w-full max-w-[min(100%,calc(78vh*var(--document-ratio)))]" style={{ ["--document-ratio" as string]: String(DOCUMENT_WIDTH / page!.content.height) }}>
             <DocumentStage
-              // Une autre page : une autre scène (le texte des zones y est posé à neuf).
-              key={page!.id}
+              // Un autre document, ou une autre page : une autre scène (le texte des zones y est posé à neuf).
+              key={`${draft.id}:${generation}:${page!.id}`}
               content={page!.content}
               backgroundSrc={backgroundSrc}
               selectedId={selectedId}
@@ -1695,7 +1809,9 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
           <Button type="button" variant="outline" size="sm" disabled={!draft.renderVersion} title={draft.renderVersion ? "Voir le document comme le joueur le lira" : "Enregistre d’abord le document"} onClick={() => setViewing({ campaignId, documentId: draft.id, title: draft.title, version: draft.renderVersion, pages: 1 + (saved?.pages?.length ?? 0), roles: saved ? [saved.content.role ?? "", ...(saved.pages ?? []).map((candidate) => candidate.content.role ?? "")] : [] })}><Eye />Aperçu</Button>
           <GiveDocumentButton campaignId={campaignId} documentId={draft.id} title={draft.title} players={players} merchants={merchants} npcs={npcs} disabledReason={!draft.renderVersion ? "Enregistre d’abord le document" : dirty ? "Enregistre d’abord tes modifications" : ""} onGiven={(text) => setMessage({ tone: "ok", text })} />
           <Button type="button" variant="outline" size="sm" disabled={draft.isNew || dirty || copying} title={draft.isNew ? "Enregistre d’abord le document" : dirty ? "Enregistre d’abord tes modifications" : "Une copie de ce document, à modifier"} onClick={duplicateDocument}>{copying ? <LoaderCircle className="animate-spin" /> : <CopyPlus />}Dupliquer</Button>
-          {templatesOn && <Button type="button" variant={draft.template ? "secondary" : "ghost"} size="sm" aria-pressed={draft.template} title={draft.template ? "C’est un modèle : il est proposé dans « Nouveau document », dans toutes tes campagnes. Clique pour le retirer des modèles." : "En faire un modèle : il sera proposé dans « Nouveau document », dans toutes tes campagnes"} onClick={() => void place(draft, { template: !draft.template })}><LayoutTemplate />{draft.template ? "Modèle" : "En faire un modèle"}</Button>}
+          {templatesOn && (draft.template
+            ? <Button type="button" variant="secondary" size="sm" aria-pressed title="C’est un modèle : il est proposé dans « Nouveau document », dans toutes tes campagnes. Clique pour le retirer des modèles (il reste un document)." onClick={() => void place(draft, { template: false })}><LayoutTemplate />Retirer des modèles</Button>
+            : <Button type="button" variant="ghost" size="sm" disabled={draft.isNew || dirty || makingTemplate} title={draft.isNew ? "Enregistre d’abord le document" : dirty ? "Enregistre d’abord tes modifications" : "Un modèle à part, copie de ce document : proposé dans « Nouveau document », dans toutes tes campagnes. Ce document reste tel quel."} onClick={() => void saveAsTemplate()}>{makingTemplate ? <LoaderCircle className="animate-spin" /> : <LayoutTemplate />}{makingTemplate ? "Modèle en cours…" : "Enregistrer comme modèle"}</Button>)}
           <Button type="button" variant="ghost" size="sm" className="text-destructive" onClick={() => setDeleting(true)}><Trash2 />Supprimer</Button>
         </div>
       </>}
@@ -1750,7 +1866,7 @@ export function DocumentStudio({ campaignId, initialDocuments, initialTemplates 
         <AlertDialogHeader><AlertDialogTitle>Abandonner les modifications ?</AlertDialogTitle><AlertDialogDescription>« {draft?.title} » a des modifications non enregistrées.</AlertDialogDescription></AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Rester</AlertDialogCancel>
-          <AlertDialogAction variant="destructive" onClick={() => { const action = pendingSwitch; setPendingSwitch(null); try { window.localStorage.removeItem(backupKey(campaignId)) } catch { /* rien */ } action?.() }}>Abandonner</AlertDialogAction>
+          <AlertDialogAction variant="destructive" onClick={() => { const action = pendingSwitch; setPendingSwitch(null); try { window.localStorage.removeItem(backupKey(campaignId)) } catch { /* rien */ } backupId.current = null; action?.() }}>Abandonner</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
